@@ -588,6 +588,36 @@ class IntegrationHelpersTests(unittest.TestCase):
         ):
             self.assertEqual(trade.rest_take_profit("500", held), [])
 
+    def test_stop_loss_is_reserved_ahead_and_cleaned_up_when_sold(self):
+        # 손절은 지정가로 미리 못 겁니다. STOP 예약으로 걸고, 안 들고 있으면 치웁니다.
+        held = {"SOXL": {"name": "SOXL", "qty": 5, "avg": 20.0, "pnl_pct": 0.0}}
+        sent = []
+        with (
+            mock.patch.object(strategy, "US_SYMBOLS", ["SOXL"]),
+            mock.patch.object(strategy, "STOP_LOSS_PCT", -10.0),
+            mock.patch.object(strategy, "STOP_LOSS_PCTS", {"SOXL": -20.0}),
+            mock.patch.object(broker, "us_session", return_value="regular"),
+            mock.patch.object(broker, "us_reserved_stops", return_value={}),
+            mock.patch.object(broker, "us_reserve_stop", side_effect=lambda *a: sent.append(a) or "7"),
+        ):
+            done = trade.rest_stop_loss("500", held)
+        # SOXL은 -10%가 아니라 제 손절선 -20%를 씁니다. $20.00 의 -20% 는 $16.00.
+        self.assertEqual(sent, [("500", "SOXL", 5, 16.0)])
+        self.assertIn("$16.00", done[0]["한 일"])
+
+        # 팔고 나서 남은 예약은 다음 회차가 치웁니다. 없는 주식을 팔면 안 됩니다.
+        cancelled = []
+        with (
+            mock.patch.object(strategy, "US_SYMBOLS", ["SOXL"]),
+            mock.patch.object(broker, "us_session", return_value="regular"),
+            mock.patch.object(broker, "us_reserved_stops",
+                              return_value={"SOXL": [{"day": "20260908", "no": "7", "qty": 5, "stop": 16.0}]}),
+            mock.patch.object(broker, "us_reserved_cancel", side_effect=lambda *a: cancelled.append(a)),
+            mock.patch.object(broker, "us_reserve_stop", side_effect=AssertionError("걸면 안 됨")),
+        ):
+            trade.rest_stop_loss("500", {})
+        self.assertEqual(cancelled, [("500", "SOXL", "20260908", "7")])
+
     def test_stop_loss_cancels_the_resting_take_profit_first(self):
         # 걸어 둔 익절이 수량을 묶고 있으면 손절이 0주로 조용히 실패합니다.
         m = {

@@ -468,15 +468,8 @@ def us_open_sells(act):
     주문일자는 NH가 어느 날짜로 적는지(한국 날짜인지 뉴욕 날짜인지) 확실치 않은데,
     미국 정규장은 한국 날짜로 이틀에 걸칩니다. 그래서 오늘과 어제를 둘 다 봅니다.
     """
-    seoul = datetime.datetime.now(SEOUL)
-    days = {
-        seoul.strftime("%Y%m%d"),
-        (seoul - datetime.timedelta(days=1)).strftime("%Y%m%d"),
-        datetime.datetime.now(NEW_YORK).strftime("%Y%m%d"),
-    }
-
     result = {}
-    for day in sorted(days):
+    for day in _us_days():
         try:
             rows = _call(
                 "/gbstock/inquiry/v1/unexecuted",
@@ -507,6 +500,98 @@ def us_open_sells(act):
                 "price": round(float(row.get("fc_orr_uit_pr") or 0), 2),
             })
     return result
+
+
+def _us_days():
+    """예약주문을 찾을 날짜들. 미국 정규장은 한국 날짜로 이틀에 걸칩니다."""
+    seoul = datetime.datetime.now(SEOUL)
+    return sorted({
+        seoul.strftime("%Y%m%d"),
+        (seoul - datetime.timedelta(days=1)).strftime("%Y%m%d"),
+        datetime.datetime.now(NEW_YORK).strftime("%Y%m%d"),
+    })
+
+
+def us_reserved_stops(act):
+    """살아 있는 STOP 손절 예약. {티커: [{주문일자, 접수번호, 수량, 기준가}, …]}
+
+    손절은 지정가로 미리 걸 수 없습니다(지금 값 아래에 걸면 즉시 팔립니다).
+    NH는 그것을 **예약주문**으로 받습니다. 값이 닿으면 그때 시장가로 나갑니다.
+    """
+    result = {}
+    for day in _us_days():
+        try:
+            rows = _call(
+                "/gbstock/inquiry/v1/reservedInquiry",
+                {
+                    "fc_mkt_dit_cd": US_NATION,
+                    "bkg_orr_dt": day,
+                    "act_no": act,
+                    "sby_dit_cd": "1",  # 매도만
+                    "bkg_orr_can_yn": "1",  # 접수된 것만 (취소·완료 제외)
+                    "oss_orr_knd_cd": "0",
+                    "bkg_orr_tp_cd": "0",
+                    "wtm_cur_knd_cd": "0",
+                },
+            ).get("Output_0") or []
+        except Exception as exc:
+            if getattr(exc, "code", "") != "11512":  # 그날 예약이 없음
+                raise
+            continue
+        for row in rows:
+            ticker = str(row.get("iem_cd") or "").strip()
+            if not ticker or str(row.get("orr_pdt_dit_cd") or "").strip() != "03":
+                continue
+            result.setdefault(ticker, []).append({
+                "day": day,
+                "no": str(row.get("bkg_rtn_orr_no") or "").strip(),
+                "qty": int(float(row.get("orr_qty") or 0)),
+                "stop": round(float(row.get("fc_stop_orr_bse_pr") or 0), 2),
+            })
+    return result
+
+
+def us_reserve_stop(act, ticker, qty, stop_price):
+    """STOP(시장가) 손절을 예약합니다. 오늘 하루짜리로 겁니다.
+
+    며칠짜리로 걸면 나중에 어느 날짜로 등록했는지 알아야 찾을 수 있습니다. 하루짜리면
+    오늘만 보면 되고, 회차가 15분마다 도니 매일 첫 회차가 알아서 다시 겁니다.
+    """
+    day = datetime.datetime.now(SEOUL).strftime("%Y%m%d")
+    return (
+        _call(
+            "/gbstock/order/v1/reservedSubmit",
+            {
+                "act_no": act,
+                "fc_sec_trd_nat_cd": US_NATION,
+                "iem_cd": ticker,
+                "oss_sby_dit_cd": "1",  # 매도
+                "orr_qty": int(qty),
+                "nmn_pr_tp_cd": "15",  # STOP(시장가)
+                "fc_stop_orr_bse_pr": round(float(stop_price), 2),
+                "orr_pdt_dit_cd": "03",  # 미국Stop예약주문
+                "bkg_orr_tp_cd": "1",  # 일반예약
+                "bkg_orr_sta_dt": day,
+                "bkg_orr_end_dt": day,
+            },
+        ).get("Output_0")
+        or {}
+    ).get("bkg_rtn_orr_no")
+
+
+def us_reserved_cancel(act, ticker, day, reserved_no):
+    """걸어 둔 STOP 예약을 취소합니다."""
+    return _call(
+        "/gbstock/order/v1/reservedCancel",
+        {
+            "act_no": act,
+            "fc_mkt_dit_cd": US_NATION,
+            "bkg_orr_dt": day,
+            "bkg_rtn_orr_no": reserved_no,
+            "iem_cd": ticker,
+            "orr_pdt_dit_cd": "03",
+        },
+    )
 
 
 def us_cancel(act, ticker, order_no):

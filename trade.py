@@ -219,6 +219,7 @@ def scan(act, dry=False):
     held, cash = refreshed(act, held, cash, done)
     # 사고판 뒤에 겁니다. 익절이 이미 걸려 있는 종목은 건너뜁니다.
     done += rest_take_profit(act, held, dry)
+    done += rest_stop_loss(act, held, dry)
     return {
         "요약": summary(done, skipped, ask),
         "장": "열림",
@@ -559,6 +560,76 @@ def rest_take_profit(act, held, dry=False):
     return out
 
 
+def rest_stop_loss(act, held, dry=False):
+    """손절을 **STOP 예약주문으로 미리 걸어 둡니다.** 값이 닿으면 시장가로 나갑니다.
+
+    지정가로는 손절을 미리 못 겁니다. 지금 값 아래에 파는 주문을 걸면 그 자리에서
+    바로 팔리기 때문입니다. NH는 이것을 예약주문으로 받습니다.
+
+    익절(지정가)과 손절(STOP 예약)이 동시에 걸려 있어도, 한쪽이 체결되면 다른 쪽을
+    지워 주는 기능이 NH에 없습니다. 그래서 여기서 **안 들고 있는 종목의 예약을 먼저
+    치웁니다.** 15분마다 도니 유령 주문은 길어야 그동안만 남습니다.
+
+    15분마다 확인하는 손절은 그대로 둡니다. 예약이 거부됐을 때의 마지막 그물입니다.
+    """
+    if broker.us_session() != "regular":
+        return []
+    try:
+        resting = broker.us_reserved_stops(act)
+    except Exception as exc:
+        log(f"  걸어 둔 손절 예약을 확인하지 못해 이번 회차는 건너뜁니다: {exc}")
+        return []
+
+    out = []
+    # 판 뒤에 남은 예약부터 치웁니다. 남겨 두면 없는 주식을 팔려고 듭니다.
+    for ticker, orders in resting.items():
+        if held.get(ticker) or dry:
+            continue
+        for order in orders:
+            try:
+                broker.us_reserved_cancel(act, ticker, order["day"], order["no"])
+                log(f"  {ticker} 안 들고 있어 손절 예약 {order['no']}을 취소했습니다")
+                out.append(noted(ticker, f"손절 예약 취소 {order['no']} · 이제 안 들고 있습니다"))
+            except Exception as exc:
+                log(f"  {ticker} 손절 예약을 취소하지 못했습니다: {exc}")
+
+    stops = getattr(strategy, "STOP_LOSS_PCTS", {})
+    for ticker in getattr(strategy, "US_SYMBOLS", []):
+        row = held.get(ticker)
+        if not row or resting.get(ticker):
+            continue
+        avg, qty = float(row.get("avg") or 0), int(row.get("qty") or 0)
+        pct = stops.get(ticker, getattr(strategy, "STOP_LOSS_PCT", 0))
+        if avg <= 0 or qty < 1 or pct >= 0:
+            continue
+
+        trigger = round(avg * (1 + pct / 100), 2)
+        where = label(row.get("name"), ticker)
+        reason = f"평균 {avg:,.2f}달러의 {pct}%인 {trigger:,.2f}달러에 닿으면 팝니다"
+        log(f"  {where} 손절 예약 {trigger:,.2f}달러 · {qty}주")
+        if dry:
+            out.append(noted(where, "손절을 걸었을 것 (확인용이라 주문하지 않음)", reason))
+            continue
+
+        m = {
+            "code": ticker, "name": row.get("name") or ticker, "market": "us",
+            "currency": "USD", "price": trigger, "qty": qty,
+            "pnl_pct": row.get("pnl_pct", 0.0),
+        }
+        try:
+            denied = approved(act, m, "sell", qty, trigger, reason)
+            if denied:
+                out.append(noted(where, denied, reason))
+                continue
+            no = broker.us_reserve_stop(act, ticker, qty, trigger)
+        except Exception as exc:
+            log(f"    손절 예약을 걸지 못했습니다: {exc}")
+            out.append(noted(where, f"손절 예약 실패 · {exc}", reason))
+            continue
+        out.append(noted(where, f"손절 예약 {qty}주 @ ${trigger:,.2f} · 접수번호 {no}", reason, "예약"))
+    return out
+
+
 def execute(act, m, held, action, reason, dry=False):
     """한 종목을 실제로 주문합니다. 무슨 일이 있었는지 항목으로 돌려줍니다."""
     where = label(m["name"], m["code"])
@@ -656,6 +727,10 @@ def sell(act, m, reason=""):
             for order in broker.us_open_sells(act).get(m["code"], []):
                 broker.us_cancel(act, m["code"], order["orr_no"])
                 log(f"    걸어 둔 매도 주문 {order['orr_no']}을 취소했습니다")
+            # STOP 손절 예약도 같이 풉니다. 남기면 없는 주식을 팔려고 듭니다.
+            for order in broker.us_reserved_stops(act).get(m["code"], []):
+                broker.us_reserved_cancel(act, m["code"], order["day"], order["no"])
+                log(f"    걸어 둔 손절 예약 {order['no']}을 취소했습니다")
         except Exception as exc:
             log(f"    걸어 둔 주문을 확인하지 못했습니다: {exc}")
         order_type = broker.us_order_type(broker.us_session())
@@ -838,6 +913,7 @@ def do(act, calls):
     held, cash = refreshed(act, held, cash, done)
     # 방금 산 것에도 익절을 걸어 둡니다. 당일 매수분이라 못 걸면 다음 회차가 겁니다.
     done += rest_take_profit(act, held)
+    done += rest_stop_loss(act, held)
     return {
         "요약": traded(done, held),
         "장": "열림",
