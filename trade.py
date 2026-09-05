@@ -217,6 +217,8 @@ def scan(act, dry=False):
             skipped.append(f"{m['name']}({code}) {reason}")
 
     held, cash = refreshed(act, held, cash, done)
+    # 사고판 뒤에 겁니다. 익절이 이미 걸려 있는 종목은 건너뜁니다.
+    done += rest_take_profit(act, held, dry)
     return {
         "요약": summary(done, skipped, ask),
         "장": "열림",
@@ -498,6 +500,65 @@ def noted(where, did, reason="", kind="그대로"):
     return out
 
 
+def rest_take_profit(act, held, dry=False):
+    """산 것에 익절 매도를 **미리 걸어 둡니다.** 회차마다 없는 것만 새로 겁니다.
+
+    회차 사이에 값이 목표를 찍고 되돌아오면 다음 회차에서는 이미 늦습니다. 미리
+    걸어 둔 주문은 증권사에 얹혀 있다가 값이 닿는 순간 저절로 체결되므로, 우리가
+    깨어 있지 않아도 됩니다. 손절은 이렇게 못 합니다. 지금 값보다 아래에 파는
+    주문을 걸면 그 자리에서 바로 팔려 버리기 때문입니다.
+    """
+    pct = getattr(strategy, "TAKE_PROFIT_PCT", 0)
+    # 연장 세션에 건 지정가는 그 세션에서만 살아 있습니다. 정규장에서만 겁니다.
+    if pct <= 0 or broker.us_session() != "regular":
+        return []
+
+    # 이미 걸린 것을 못 읽으면 두 번 걸 수 있습니다. 그럴 바에는 이번 회차를 쉽니다.
+    try:
+        resting = broker.us_open_sells(act)
+    except Exception as exc:
+        log(f"  걸어 둔 매도 주문을 확인하지 못해 익절 예약을 건너뜁니다: {exc}")
+        return []
+    out = []
+    for ticker in getattr(strategy, "US_SYMBOLS", []):
+        row = held.get(ticker)
+        if not row or resting.get(ticker):
+            continue
+        avg, qty = float(row.get("avg") or 0), int(row.get("qty") or 0)
+        if avg <= 0 or qty < 1:
+            continue
+
+        target = round(avg * (1 + pct / 100), 2)
+        where = label(row.get("name"), ticker)
+        reason = f"평균 {avg:,.2f}달러의 +{pct}%인 {target:,.2f}달러에 미리 걸어 둡니다"
+        log(f"  {where} 익절 예약 {target:,.2f}달러 · {qty}주")
+        if dry:
+            out.append(noted(where, "익절 매도를 걸었을 것 (확인용이라 주문하지 않음)", reason))
+            continue
+
+        m = {
+            "code": ticker, "name": row.get("name") or ticker, "market": "us",
+            "currency": "USD", "price": target, "qty": qty,
+            "pnl_pct": row.get("pnl_pct", 0.0),
+        }
+        try:
+            sellable = broker.us_sellable(act, ticker, target, "00")
+            if sellable < 1:
+                out.append(noted(where, "당일 매수분이라 아직 걸 수 없습니다", reason))
+                continue
+            denied = approved(act, m, "sell", min(qty, sellable), target, reason)
+            if denied:
+                out.append(noted(where, denied, reason))
+                continue
+            order_no = broker.us_order(act, "sell", ticker, min(qty, sellable), target, "00")
+        except Exception as exc:
+            log(f"    익절 예약을 걸지 못했습니다: {exc}")
+            out.append(noted(where, f"익절 예약 실패 · {exc}", reason))
+            continue
+        out.append(noted(where, f"익절 매도 예약 {min(qty, sellable)}주 @ ${target:,.2f} · 주문번호 {order_no}", reason, "예약"))
+    return out
+
+
 def execute(act, m, held, action, reason, dry=False):
     """한 종목을 실제로 주문합니다. 무슨 일이 있었는지 항목으로 돌려줍니다."""
     where = label(m["name"], m["code"])
@@ -588,6 +649,15 @@ def buy(act, m, held, reason=""):
 def sell(act, m, reason=""):
     price = m["price"]
     if m["market"] == "us":
+        # 익절을 미리 걸어 두었으면 그 수량이 묶여 있습니다. 먼저 풀지 않으면
+        # 손절이 "팔 수 있는 수량 0주"로 조용히 실패합니다.
+        # 조회가 실패했다고 손절까지 막으면 안 됩니다. 파는 쪽은 늘 진행합니다.
+        try:
+            for order in broker.us_open_sells(act).get(m["code"], []):
+                broker.us_cancel(act, m["code"], order["orr_no"])
+                log(f"    걸어 둔 매도 주문 {order['orr_no']}을 취소했습니다")
+        except Exception as exc:
+            log(f"    걸어 둔 주문을 확인하지 못했습니다: {exc}")
         order_type = broker.us_order_type(broker.us_session())
         qty = min(m["qty"], broker.us_sellable(act, m["code"], price, order_type))
     else:
@@ -766,6 +836,8 @@ def do(act, calls):
 
     tell_what_did_not_go(done)
     held, cash = refreshed(act, held, cash, done)
+    # 방금 산 것에도 익절을 걸어 둡니다. 당일 매수분이라 못 걸면 다음 회차가 겁니다.
+    done += rest_take_profit(act, held)
     return {
         "요약": traded(done, held),
         "장": "열림",

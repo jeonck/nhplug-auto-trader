@@ -270,6 +270,7 @@ def order(act, side, code, qty, limit_price):
 
 US_NATION = "200"  # 미국
 NEW_YORK = ZoneInfo("America/New_York")
+SEOUL = ZoneInfo("Asia/Seoul")
 
 
 def us_session(now=None):
@@ -456,6 +457,73 @@ def us_buyable(act, ticker, price, order_type):
 
 def us_sellable(act, ticker, price, order_type):
     return int(float(_us_orderable(act, ticker, price, order_type, "sell").get("sll_pbl_qty") or 0))
+
+
+def us_open_sells(act):
+    """아직 안 채워진 미국 매도 주문. {티커: [{주문번호, 남은수량, 단가}, …]}
+
+    익절을 미리 걸어 두면 그 수량은 묶입니다. 손절이 나야 할 때 걸린 주문을 먼저
+    취소하지 않으면 "팔 수 있는 수량 0주"가 되어 손절이 조용히 실패합니다.
+
+    주문일자는 NH가 어느 날짜로 적는지(한국 날짜인지 뉴욕 날짜인지) 확실치 않은데,
+    미국 정규장은 한국 날짜로 이틀에 걸칩니다. 그래서 오늘과 어제를 둘 다 봅니다.
+    """
+    seoul = datetime.datetime.now(SEOUL)
+    days = {
+        seoul.strftime("%Y%m%d"),
+        (seoul - datetime.timedelta(days=1)).strftime("%Y%m%d"),
+        datetime.datetime.now(NEW_YORK).strftime("%Y%m%d"),
+    }
+
+    result = {}
+    for day in sorted(days):
+        try:
+            rows = _call(
+                "/gbstock/inquiry/v1/unexecuted",
+                {
+                    "orr_dt": day,
+                    "act_no": act,
+                    "oss_sby_dit_cd": "1",  # 매도만
+                    "sot_dit": "1",
+                    "ost_cns_dit": "2",  # 미체결만
+                },
+            ).get("Output_0") or []
+        except Exception as exc:
+            # 그날 주문이 하나도 없으면 NH가 "데이터가 존재하지 않습니다"로 답합니다.
+            # 그것은 오류가 아니라 "없음"입니다. 오류로 읽으면 익절 예약이 영영
+            # 걸리지 않습니다. 나머지 오류는 그대로 올립니다.
+            if getattr(exc, "code", "") != "11512":
+                raise
+            continue
+        for row in rows:
+            ticker = str(row.get("iem_cd") or "").strip()
+            left = int(float(row.get("ny_cns_orr_qty") or 0))
+            order_no = str(row.get("orr_no") or "").strip()
+            if not ticker or not order_no or left <= 0:
+                continue
+            result.setdefault(ticker, []).append({
+                "orr_no": order_no,
+                "qty": left,
+                "price": round(float(row.get("fc_orr_uit_pr") or 0), 2),
+            })
+    return result
+
+
+def us_cancel(act, ticker, order_no):
+    """걸어 둔 미국 주문을 통째로 취소합니다."""
+    return (
+        _call(
+            "/gbstock/order/v1/cancel",
+            {
+                "act_no": act,
+                "org_orr_no": order_no,
+                "fc_sec_trd_nat_cd": US_NATION,
+                "iem_cd": ticker,
+                "all_pat_dit_cd": "1",  # 전체 취소
+            },
+        ).get("Output_0")
+        or {}
+    ).get("orr_no")
 
 
 def us_order(act, side, ticker, qty, price, order_type):

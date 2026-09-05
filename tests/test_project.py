@@ -562,6 +562,51 @@ class IntegrationHelpersTests(unittest.TestCase):
             note = trade.buy("500", m, {}, "사고 싶다")
         self.assertIn("0주", note)
 
+    def test_take_profit_is_placed_ahead_of_time_and_only_once(self):
+        # 회차 사이에 목표를 찍고 되돌아오면 늦습니다. 미리 걸어 둬야 합니다.
+        # 그리고 이미 걸려 있으면 또 걸면 안 됩니다. 두 번 팔리게 됩니다.
+        held = {"SOXL": {"name": "SOXL", "qty": 5, "avg": 20.0, "pnl_pct": 0.0}}
+        sent = []
+        with (
+            mock.patch.object(strategy, "US_SYMBOLS", ["SOXL"]),
+            mock.patch.object(strategy, "TAKE_PROFIT_PCT", 3.0),
+            mock.patch.object(broker, "us_session", return_value="regular"),
+            mock.patch.object(broker, "us_sellable", return_value=5),
+            mock.patch.object(broker, "us_order", side_effect=lambda *a, **k: sent.append(a) or "9"),
+            mock.patch.object(broker, "us_open_sells", return_value={}),
+        ):
+            done = trade.rest_take_profit("500", held)
+        # 평균 $20.00 의 +3% 는 $20.60 입니다.
+        self.assertEqual(sent[0][1:], ("sell", "SOXL", 5, 20.6, "00"))
+        self.assertIn("$20.60", done[0]["한 일"])
+
+        with (
+            mock.patch.object(strategy, "US_SYMBOLS", ["SOXL"]),
+            mock.patch.object(broker, "us_session", return_value="regular"),
+            mock.patch.object(broker, "us_order", side_effect=AssertionError("또 걸면 안 됨")),
+            mock.patch.object(broker, "us_open_sells", return_value={"SOXL": [{"orr_no": "9", "qty": 5, "price": 20.6}]}),
+        ):
+            self.assertEqual(trade.rest_take_profit("500", held), [])
+
+    def test_stop_loss_cancels_the_resting_take_profit_first(self):
+        # 걸어 둔 익절이 수량을 묶고 있으면 손절이 0주로 조용히 실패합니다.
+        m = {
+            "code": "SOXL", "name": "SOXL", "market": "us", "currency": "USD",
+            "price": 16.0, "qty": 5, "avg": 20.0, "pnl_pct": -20.0, "held": True,
+        }
+        cancelled = []
+        with (
+            mock.patch.object(broker, "MOCK", True),
+            mock.patch.object(broker, "us_session", return_value="regular"),
+            mock.patch.object(broker, "us_open_sells", return_value={"SOXL": [{"orr_no": "9", "qty": 5, "price": 20.6}]}),
+            mock.patch.object(broker, "us_cancel", side_effect=lambda *a: cancelled.append(a)),
+            mock.patch.object(broker, "us_sellable", return_value=5),
+            mock.patch.object(broker, "us_order", return_value="10"),
+        ):
+            note = trade.sell("500", m, "손절")
+        self.assertEqual(cancelled, [("500", "SOXL", "9")])
+        self.assertIn("주문번호", note)
+
     def test_switching_to_the_real_account_does_not_ask_for_the_keys_again(self):
         # 모의 ↔ 실제만 바꾸려는 사람이 키를 다시 찾아와야 한다면, 개발을 모르는
         # 사람에게는 그 자리에서 막히는 것과 같습니다. 같은 키를 쓰니 그대로 씁니다.
