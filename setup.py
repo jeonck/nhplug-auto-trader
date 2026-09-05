@@ -1,7 +1,7 @@
 """브라우저에서 설정을 끝냅니다. `python setup.py`
 
 텍스트 편집기로 .env를 여는 일이 없도록, 키 붙여넣기 → 연결 확인까지 한 화면에서
-합니다. 전략 상담은 Codex 본체에서 하도록 프롬프트를 복사해 줍니다.
+합니다. 전략 상담은 클로드 코드 본체에서 하도록 프롬프트를 복사해 줍니다.
 표준 라이브러리만 씁니다(서버 프레임워크 없음).
 """
 
@@ -41,10 +41,10 @@ def schedule_text():
     except OSError:
         return "schedule.txt 를 찾지 못했습니다. 저장소에서 다시 받아 주세요."
 
-# Codex 본체에 붙여넣을 프롬프트. 웹 폼으로 답을 받는 것보다, 사용자가 Codex와
-# 직접 대화하면서 되묻고 다듬는 편이 훨씬 자연스럽습니다. 그래서 여기서는
+# 클로드 코드 본체에 붙여넣을 프롬프트. 웹 폼으로 답을 받는 것보다, 사용자가
+# 클로드 코드와 직접 대화하면서 되묻고 다듬는 편이 훨씬 자연스럽습니다. 그래서 여기서는
 # "상담해서 파일을 고쳐라"라고 시키기만 합니다.
-CODEX_PROMPT = """이 폴더의 strategy.py 하나만 고쳐서 내 투자 성향에 맞는 자동매매 전략을 만들어줘.
+AGENT_PROMPT = """이 폴더의 strategy.py 하나만 고쳐서 내 투자 성향에 맞는 자동매매 전략을 만들어줘.
 
 ━━ 먼저 상담부터 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -82,7 +82,7 @@ CODEX_PROMPT = """이 폴더의 strategy.py 하나만 고쳐서 내 투자 성�
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-사고팔지는 **장중에 Codex가 그때그때 판단해.** strategy.py는 판단을 지시하는
+사고팔지는 **장중에 클로드 코드가 그때그때 판단해.** strategy.py는 판단을 지시하는
 투자 원칙(INSTRUCTIONS)과, 그 판단을 받아 최종 결정하는 decide(m)를 담는 파일이야.
 내 성향은 주로 INSTRUCTIONS 글에 담고, 넘지 말아야 할 선만 숫자로 박아 줘.
 
@@ -97,8 +97,8 @@ strategy.py가 지켜야 하는 약속:
 - US_SESSIONS: 미국장을 볼 시간대 리스트. "pre"(프리마켓) "regular"(정규장)
   "after"(애프터마켓) 중에서. 상담에서 정한 대로 적어. 안 물었으면 ["regular"]
 - decide(m) 함수: ("buy" 또는 "sell" 또는 "hold", 이유 문자열) 튜플을 돌려줄 것
-- INSTRUCTIONS: 장중에 판단할 Codex에게 그대로 전달할 투자 원칙 (한국어 여러 줄)
-- facts(m): Codex에게 더 보여 줄 사실을 문자열 리스트로 돌려주는 함수
+- INSTRUCTIONS: 장중에 판단할 클로드 코드에게 그대로 전달할 투자 원칙 (한국어 여러 줄)
+- facts(m): 클로드 코드에게 더 보여 줄 사실을 문자열 리스트로 돌려주는 함수
 
 장중 판단자에게 가는 것은 이것뿐이야:
   현재가 · 최근 20일 종가 · 5일/20일 평균 · 52주 최고/최저 · 거래대금 · 보유 상태
@@ -112,12 +112,12 @@ strategy.py가 지켜야 하는 약속:
 decide에 들어오는 m에서 읽을 수 있는 값:
   code, name, market("kr"/"us"), currency("KRW"/"USD"), price, closes(오래된 것부터인
   종가 리스트), held(bool), qty, avg, pnl_pct, cash
-  ai: {"decision": "buy"|"sell"|"hold", "reason": "..."} — 장중 Codex의 판단.
+  ai: {"decision": "buy"|"sell"|"hold", "reason": "..."} — 장중 클로드 코드의 판단.
       None이면 판단을 받지 못한 것이니 절대 사면 안 돼
 
 decide()는 이 순서를 지켜:
-1) 보유 중이고 손절·익절 선에 닿았으면 Codex 판단과 무관하게 sell
-   (Codex가 죽은 날에도 손절은 돌아야 해)
+1) 보유 중이고 손절·익절 선에 닿았으면 클로드 코드 판단과 무관하게 sell
+   (클로드 코드가 죽은 날에도 손절은 돌아야 해)
 2) 미보유인데 거를 조건(거래대금 부족 등)이면 hold
 3) m["ai"]가 없거나 decision이 이상하면 hold
 4) 나머지는 m["ai"]["decision"]을 따르고, 이유는 m["ai"]["reason"]을 그대로 써
@@ -227,15 +227,15 @@ td.down{color:#1552c7}
 </section>
 
 <section id="s2" class="dim">
-  <h2><b>2</b> Codex와 상담해서 전략 만들기</h2>
-  <p class="help"><b>Codex와 대화하던 중이라면</b> 그 창으로 돌아가 <b>“연결됐다”</b> 라고
-    말하면 됩니다. Codex가 이어서 하나씩 물어보고, 답을 다 들으면
+  <h2><b>2</b> 클로드 코드와 상담해서 전략 만들기</h2>
+  <p class="help"><b>클로드 코드와 대화하던 중이라면</b> 그 창으로 돌아가 <b>“연결됐다”</b> 라고
+    말하면 됩니다. 클로드 코드가 이어서 하나씩 물어보고, 답을 다 들으면
     <code>strategy.py</code>를 고쳐 줍니다. 여기서는 끝나고 <b>전략 검사</b>만 누르세요.</p>
   <details style="margin-bottom:12px">
-    <summary style="cursor:pointer;font-size:.9rem">Codex를 직접 열어서 할래요 (프롬프트 복사)</summary>
-    <p class="help" style="margin-top:10px">이 폴더에서 Codex를 열고 아래를 붙여넣으세요.</p>
+    <summary style="cursor:pointer;font-size:.9rem">클로드 코드를 직접 열어서 할래요 (프롬프트 복사)</summary>
+    <p class="help" style="margin-top:10px">이 폴더에서 클로드 코드를 열고 아래를 붙여넣으세요.</p>
     <pre id="prompt"></pre>
-    <button onclick="copyPrompt()" id="cp-btn">Codex에 붙여넣을 내용 복사</button>
+    <button onclick="copyPrompt()" id="cp-btn">클로드 코드에 붙여넣을 내용 복사</button>
   </details>
   <button class="ghost" onclick="checkStrategy()" id="ck-btn">전략 검사</button>
   <div id="m2" class="msg" hidden></div>
@@ -260,10 +260,10 @@ td.down{color:#1552c7}
 </section>
 
 <section id="s4" class="dim">
-  <h2><b>4</b> 시작 — Codex에 예약 만들기</h2>
-  <p class="help">터미널에 프로그램을 띄워 놓지 않습니다. <b>Codex 앱 → 예약</b>에서
-    <b>1시간 간격</b>으로 새 작업을 만들고, 아래 내용을 그대로 넣으세요.
-    실행 위치는 <b>이 기기</b>로 둡니다.</p>
+  <h2><b>4</b> 시작 — 클로드 코드에 예약 만들기</h2>
+  <p class="help">터미널에 프로그램을 띄워 놓지 않습니다. 클로드 코드 창으로 돌아가
+    <b>“예약 만들어 줘”</b> 라고 말하면, 클로드 코드가 <b>1시간 간격</b> 예약을
+    대신 만들어 줍니다. 예약에 들어가는 내용은 아래 두 줄이 전부입니다.</p>
   <pre id="cmd">%%POINTER%%</pre>
   <p class="help">이게 전부입니다. 시키는 내용은 <code>schedule.txt</code>에 있고 예약은 그걸
     읽어서 합니다. 그래서 <b>내용이 바뀌어도 예약은 다시 안 고쳐도 됩니다.</b>
@@ -360,8 +360,8 @@ async function copyPrompt(){
     getSelection().removeAllRanges(); getSelection().addRange(r);
     btn.textContent = '위 내용을 직접 복사해 주세요 (Ctrl+C)'; return;
   }
-  btn.textContent = '복사했습니다. Codex에 붙여넣으세요';
-  setTimeout(() => { btn.textContent = 'Codex에 붙여넣을 내용 복사'; }, 4000);
+  btn.textContent = '복사했습니다. 클로드 코드에 붙여넣으세요';
+  setTimeout(() => { btn.textContent = '클로드 코드에 붙여넣을 내용 복사'; }, 4000);
 }
 async function account(){
   const btn = document.getElementById('a-btn');
@@ -562,7 +562,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # 누군가 화면을 열었다는 표시. 열렸으면 "이렇게 접속하세요" 안내를 더
         # 뿌리지 않습니다.
         self.server.opened = True
-        page = PAGE.replace("%%PROMPT%%", json.dumps(CODEX_PROMPT, ensure_ascii=False))
+        page = PAGE.replace("%%PROMPT%%", json.dumps(AGENT_PROMPT, ensure_ascii=False))
         # 예약에 넣을 글은 schedule.txt 한 곳에만 둡니다. 화면과 README가 따로
         # 적혀 있으면 언젠가 서로 어긋납니다.
         page = page.replace("%%SCHEDULE%%", schedule_text()).replace("%%POINTER%%", POINTER)
@@ -818,7 +818,7 @@ def parse_args(argv):
 def agent_guide(port):
     """서버에서 실행됐을 때 맨 처음 나오는 글.
 
-    이 글을 읽는 것은 사람이 아니라 에이전트(Codex 등)입니다. 사람은 터미널을
+    이 글을 읽는 것은 사람이 아니라 에이전트(클로드 코드 등)입니다. 사람은 터미널을
     쓸 줄 모릅니다. 그러니 여기에 사람이 칠 명령을 적어 두면 안 됩니다. 적어 두면
     에이전트가 그걸 그대로 사용자에게 옮겨 붙이고, 사용자는 막힙니다.
     에이전트에는 대개 포트를 이어 주는 기능(웹 미리보기)이 있으니 그것을 시킵니다.

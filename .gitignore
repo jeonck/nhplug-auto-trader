@@ -6,3 +6,6 @@ __pycache__/
 .ruff_cache/
 strategy_backup.py
 *.log
+
+# 클로드 코드가 이 기기에만 쓰는 설정
+.claude/settings.local.json

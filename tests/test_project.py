@@ -474,7 +474,7 @@ class IntegrationHelpersTests(unittest.TestCase):
     def test_agents_file_tells_the_agent_the_live_keyword(self):
         # 사용자는 "실전투자"라고만 칩니다. 그 말이 무엇을 뜻하는지 적어 두지 않으면
         # 에이전트마다 다르게 움직입니다.
-        guide = (Path(setup.__file__).with_name("AGENTS.md")).read_text(encoding="utf-8")
+        guide = (Path(setup.__file__).with_name("CLAUDE.md")).read_text(encoding="utf-8")
         self.assertIn("실전투자", guide)
         self.assertIn("setup.py --live", guide)
         self.assertIn("check.py", guide)  # 검사를 통과해야 실제 돈으로 갑니다
@@ -485,6 +485,34 @@ class IntegrationHelpersTests(unittest.TestCase):
         self.assertIn("잃어도 생활에 지장 없는 금액", guide)
         # 눈에 걸리는 것은 짚어 주되, 무엇을 하라고 시키지는 않습니다.
         self.assertIn("고치라고 시키지 말고", guide)
+
+    def test_agents_file_points_at_the_one_guide(self):
+        # 지침이 두 벌이면 하나만 고쳐지고 서로 달라집니다. AGENTS.md 는 가리키기만 합니다.
+        here = Path(setup.__file__).parent
+        pointer = (here / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("CLAUDE.md", pointer)
+        # 절차를 여기에 다시 적어 두면 그때부터 갈라집니다.
+        self.assertNotIn("setup.py --live", pointer)
+
+    def test_claude_settings_keep_the_keys_out_of_the_conversation(self):
+        # .env 에는 NH·Telegram 키가 들어 있습니다. 에이전트가 읽을 일이 없습니다.
+        settings = json.loads(
+            (Path(setup.__file__).with_name(".claude") / "settings.json").read_text(encoding="utf-8")
+        )
+        deny = settings["permissions"]["deny"]
+        for rule in ("Read(./.env)", "Edit(./.env)", "Write(./.env)"):
+            self.assertIn(rule, deny)
+        # 예약이 사람 없이 도는 모드에서도 이 명령들은 물어보지 않고 돌아야 합니다.
+        allow = settings["permissions"]["allow"]
+        self.assertIn("Bash(python trade.py:*)", allow)
+        self.assertIn("WebFetch(domain:news.google.com)", allow)
+
+    def test_slash_commands_exist_for_what_the_user_types(self):
+        # 사용자가 한국어로 치는 말마다 대응하는 절차가 있어야 합니다.
+        commands = Path(setup.__file__).with_name(".claude") / "commands"
+        for name in ("board", "setup", "check", "scan", "live"):
+            body = (commands / f"{name}.md").read_text(encoding="utf-8")
+            self.assertIn("description:", body)
 
     def test_limits_are_visible_without_opening_the_strategy_file(self):
         # 파일을 못 여는 사람이 자기 돈이 얼마나 걸려 있는지 알 길이 있어야 합니다.
@@ -907,7 +935,7 @@ class IntegrationHelpersTests(unittest.TestCase):
         self.assertEqual(result["처리함"][0]["뉴스"], "오하이오 데이터센터 자금 지원 제목")
 
     def test_do_puts_the_decision_back_through_the_rules(self):
-        # Codex가 사라고 해도 규칙이 걸러야 합니다(여기서는 거래대금 부족).
+        # 클로드 코드가 사라고 해도 규칙이 걸러야 합니다(여기서는 거래대금 부족).
         m = {
             "code": "005930", "name": "테스트", "market": "kr", "currency": "KRW",
             "price": 71000, "closes": [70000] * 20, "held": False, "qty": 0, "avg": 0,
