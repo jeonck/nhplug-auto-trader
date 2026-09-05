@@ -265,6 +265,16 @@ def portfolio(held, cash):
     return out
 
 
+def us_budget(ticker):
+    """이 미국 종목 한 자리에 넣을 금액(달러).
+
+    종목마다 다르게 두고 싶을 때만 strategy.US_BUY_AMOUNTS 에 적습니다. 적지 않은
+    종목은 US_BUY_AMOUNT 를 그대로 씁니다. SOXL 처럼 3배로 움직이는 상품에 다른
+    종목과 같은 돈을 넣으면 위험만 3배가 되기 때문에 필요한 구멍입니다.
+    """
+    return getattr(strategy, "US_BUY_AMOUNTS", {}).get(ticker, getattr(strategy, "US_BUY_AMOUNT", 300))
+
+
 def limits():
     """지금 걸려 있는 한도. 실제 돈으로 넘어가기 전에 이 숫자부터 봐야 합니다.
 
@@ -274,15 +284,23 @@ def limits():
     per_kr = strategy.BUY_AMOUNT
     per_us = getattr(strategy, "US_BUY_AMOUNT", 0)
     most = strategy.MAX_HOLDINGS
+    # 종목마다 금액이 다르면 "미국 $2,000"만 보여 주는 것은 거짓말이 됩니다.
+    # 다른 것만 뒤에 붙이고, 최대 금액은 비싼 자리부터 채운 값으로 계산합니다.
+    odd_us = {t: us_budget(t) for t in getattr(strategy, "US_SYMBOLS", []) if us_budget(t) != per_us}
+    us_text = f"미국 ${per_us:,}" + (
+        " (" + " · ".join(f"{t} ${v:,}" for t, v in odd_us.items()) + ")" if odd_us else ""
+    )
+    worst_us = sum(sorted((us_budget(t) for t in getattr(strategy, "US_SYMBOLS", [])), reverse=True)[:most])
+    stops = getattr(strategy, "STOP_LOSS_PCTS", {})
+    stop_text = f"{getattr(strategy, 'STOP_LOSS_PCT', 0):+.1f}%" + (
+        " (" + " · ".join(f"{t} {v:+.1f}%" for t, v in stops.items()) + ")" if stops else ""
+    )
     return {
-        "한 종목에 넣는 돈": f"국내 {per_kr:,}원 · 미국 ${per_us:,}",
+        "한 종목에 넣는 돈": f"국내 {per_kr:,}원 · {us_text}",
         "최대 종목 수": f"{most}종목",
         # 다 국내로 채울 때와 다 미국으로 채울 때가 다릅니다. 둘 다 보여 줍니다.
-        "최대로 들어갈 수 있는 돈": f"국내만이면 {per_kr * most:,}원 · 미국만이면 ${per_us * most:,}",
-        "손절 · 익절": (
-            f"{getattr(strategy, 'STOP_LOSS_PCT', 0):+.1f}% · "
-            f"{getattr(strategy, 'TAKE_PROFIT_PCT', 0):+.1f}%"
-        ),
+        "최대로 들어갈 수 있는 돈": f"국내만이면 {per_kr * most:,}원 · 미국만이면 ${worst_us:,}",
+        "손절 · 익절": f"{stop_text} · {getattr(strategy, 'TAKE_PROFIT_PCT', 0):+.1f}%",
         "미국을 보는 시간대": " · ".join(
             {"pre": "프리마켓", "regular": "정규장", "after": "애프터마켓"}[s] for s in us_sessions()
         ),
@@ -542,7 +560,7 @@ def buy(act, m, held, reason=""):
 
     price = m["price"]
     if m["market"] == "us":
-        budget = getattr(strategy, "US_BUY_AMOUNT", 300)
+        budget = us_budget(m["code"])
         order_type = broker.us_order_type(broker.us_session())
         qty = min(int(budget // price), broker.us_buyable(act, m["code"], price, order_type))
     else:

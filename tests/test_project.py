@@ -519,6 +519,7 @@ class IntegrationHelpersTests(unittest.TestCase):
         with (
             mock.patch.object(strategy, "BUY_AMOUNT", 1_000_000),
             mock.patch.object(strategy, "US_BUY_AMOUNT", 600),
+            mock.patch.object(strategy, "US_BUY_AMOUNTS", {}),
             mock.patch.object(strategy, "MAX_HOLDINGS", 5),
         ):
             caps = trade.limits()
@@ -527,6 +528,23 @@ class IntegrationHelpersTests(unittest.TestCase):
         self.assertIn("5,000,000원", caps["최대로 들어갈 수 있는 돈"])
         self.assertIn("$3,000", caps["최대로 들어갈 수 있는 돈"])
         self.assertIn("한 종목에 넣는 돈", board.page({"한도": caps, "지금": {}, "회차": []}))
+
+    def test_a_symbol_with_its_own_budget_shows_up_in_the_limits(self):
+        # 종목마다 금액이 다르면 화면이 "미국 $600"만 보여 줘서는 안 됩니다.
+        # 비싼 자리부터 채운 최대 금액도 그 값으로 나와야 합니다.
+        with (
+            mock.patch.object(strategy, "US_SYMBOLS", ["NVDA", "SOXL"]),
+            mock.patch.object(strategy, "US_BUY_AMOUNT", 600),
+            mock.patch.object(strategy, "US_BUY_AMOUNTS", {"SOXL": 10_000}),
+            mock.patch.object(strategy, "STOP_LOSS_PCTS", {"SOXL": -20.0}),
+            mock.patch.object(strategy, "MAX_HOLDINGS", 2),
+        ):
+            caps = trade.limits()
+            self.assertEqual(trade.us_budget("SOXL"), 10_000)
+            self.assertEqual(trade.us_budget("NVDA"), 600)
+        self.assertIn("SOXL $10,000", caps["한 종목에 넣는 돈"])
+        self.assertIn("$10,600", caps["최대로 들어갈 수 있는 돈"])
+        self.assertIn("SOXL -20.0%", caps["손절 · 익절"])
 
     def test_one_share_costing_more_than_the_budget_is_not_bought(self):
         # MU 한 주가 $1,029 인데 예산이 $600 이면 0주입니다. 예산을 넘겨 사지 않습니다.
