@@ -324,14 +324,21 @@ def limits():
     us_text = f"미국 ${per_us:,}" + (
         " (" + " · ".join(f"{t} ${v:,}" for t, v in odd_us.items()) + ")" if odd_us else ""
     )
-    worst_us = sum(sorted((us_budget(t) for t in getattr(strategy, "US_SYMBOLS", [])), reverse=True)[:most])
+    # 딥매수 자리는 최대 종목 수에 안 세므로 **따로 더합니다.** 안 그러면 화면이
+    # 실제보다 적은 금액을 말합니다. 파일을 못 여는 사람에게는 그게 전부입니다.
+    dip = getattr(strategy, "DIP_BUY", {})
+    tickers = getattr(strategy, "US_SYMBOLS", [])
+    others = sorted((us_budget(t) for t in tickers if t not in dip), reverse=True)[:most]
+    worst_us = sum(others) + sum(us_budget(t) for t in tickers if t in dip)
     stops = getattr(strategy, "STOP_LOSS_PCTS", {})
     stop_text = f"{getattr(strategy, 'STOP_LOSS_PCT', 0):+.1f}%" + (
         " (" + " · ".join(f"{t} {v:+.1f}%" for t, v in stops.items()) + ")" if stops else ""
     )
     return {
         "한 종목에 넣는 돈": f"국내 {per_kr:,}원 · {us_text}",
-        "최대 종목 수": f"{most}종목",
+        "최대 종목 수": f"{most}종목" + (
+            f" + 딥매수 {', '.join(sorted(dip))} (따로 셉니다)" if dip else ""
+        ),
         # 다 국내로 채울 때와 다 미국으로 채울 때가 다릅니다. 둘 다 보여 줍니다.
         "최대로 들어갈 수 있는 돈": f"국내만이면 {per_kr * most:,}원 · 미국만이면 ${worst_us:,}",
         "손절 · 익절": f"{stop_text} · {getattr(strategy, 'TAKE_PROFIT_PCT', 0):+.1f}%",

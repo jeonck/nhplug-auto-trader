@@ -140,9 +140,15 @@ def simulate(bars, take_pct, stop_pcts, base_stop, budgets, base_budget, most,
             bar, pos = bars[ticker][i], open_now[ticker]
             stop = pos["avg"] * (1 + stop_pcts.get(ticker, base_stop) / 100)
             if ticker in dip:
-                # 어제까지의 52주 고점을 되찾으면 익절. %로는 팔지 않습니다.
-                past = [b["close"] for b in bars[ticker][max(0, i - 252): i]]
-                target = max(past) if past else float("inf")
+                # 딥매수 자리는 %가 아니라 값으로 팝니다. 어제까지의 값을 씁니다.
+                rule = dip[ticker]
+                if rule.get("exit") == "ma20":
+                    days = rule.get("band_days", 20)
+                    past = [b["close"] for b in bars[ticker][max(0, i - days): i]]
+                    target = sum(past) / len(past) if len(past) == days else float("inf")
+                else:
+                    past = [b["close"] for b in bars[ticker][max(0, i - 252): i]]
+                    target = max(past) if past else float("inf")
             else:
                 pct = take_pcts.get(ticker, take_pct)
                 target = pos["avg"] * (1 + pct / 100) if pct else float("inf")

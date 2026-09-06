@@ -521,6 +521,7 @@ class IntegrationHelpersTests(unittest.TestCase):
             mock.patch.object(strategy, "BUY_AMOUNT", 1_000_000),
             mock.patch.object(strategy, "US_BUY_AMOUNT", 600),
             mock.patch.object(strategy, "US_BUY_AMOUNTS", {}),
+            mock.patch.object(strategy, "DIP_BUY", {}),
             mock.patch.object(strategy, "MAX_HOLDINGS", 5),
         ):
             caps = trade.limits()
@@ -538,6 +539,7 @@ class IntegrationHelpersTests(unittest.TestCase):
             mock.patch.object(strategy, "US_BUY_AMOUNT", 600),
             mock.patch.object(strategy, "US_BUY_AMOUNTS", {"SOXL": 10_000}),
             mock.patch.object(strategy, "STOP_LOSS_PCTS", {"SOXL": -20.0}),
+            mock.patch.object(strategy, "DIP_BUY", {}),
             mock.patch.object(strategy, "MAX_HOLDINGS", 2),
         ):
             caps = trade.limits()
@@ -566,10 +568,10 @@ class IntegrationHelpersTests(unittest.TestCase):
     def test_take_profit_is_placed_ahead_of_time_and_only_once(self):
         # 회차 사이에 목표를 찍고 되돌아오면 늦습니다. 미리 걸어 둬야 합니다.
         # 그리고 이미 걸려 있으면 또 걸면 안 됩니다. 두 번 팔리게 됩니다.
-        held = {"SOXL": {"name": "SOXL", "qty": 5, "avg": 20.0, "pnl_pct": 0.0}}
+        held = {"NVDA": {"name": "NVDA", "qty": 5, "avg": 20.0, "pnl_pct": 0.0}}
         sent = []
         with (
-            mock.patch.object(strategy, "US_SYMBOLS", ["SOXL"]),
+            mock.patch.object(strategy, "US_SYMBOLS", ["NVDA"]),
             mock.patch.object(strategy, "TAKE_PROFIT_PCT", 3.0),
             mock.patch.object(broker, "us_session", return_value="regular"),
             mock.patch.object(broker, "us_sellable", return_value=5),
@@ -578,14 +580,14 @@ class IntegrationHelpersTests(unittest.TestCase):
         ):
             done = trade.rest_take_profit("500", held)
         # 평균 $20.00 의 +3% 는 $20.60 입니다.
-        self.assertEqual(sent[0][1:], ("sell", "SOXL", 5, 20.6, "00"))
+        self.assertEqual(sent[0][1:], ("sell", "NVDA", 5, 20.6, "00"))
         self.assertIn("$20.60", done[0]["한 일"])
 
         with (
-            mock.patch.object(strategy, "US_SYMBOLS", ["SOXL"]),
+            mock.patch.object(strategy, "US_SYMBOLS", ["NVDA"]),
             mock.patch.object(broker, "us_session", return_value="regular"),
             mock.patch.object(broker, "us_order", side_effect=AssertionError("또 걸면 안 됨")),
-            mock.patch.object(broker, "us_open_sells", return_value={"SOXL": [{"orr_no": "9", "qty": 5, "price": 20.6}]}),
+            mock.patch.object(broker, "us_open_sells", return_value={"NVDA": [{"orr_no": "9", "qty": 5, "price": 20.6}]}),
         ):
             self.assertEqual(trade.rest_take_profit("500", held), [])
 
@@ -618,6 +620,46 @@ class IntegrationHelpersTests(unittest.TestCase):
         # 200일선 아래면 눌린 자리가 아니라 무너지는 자리입니다. 사지 않습니다.
         crashed = rising_index + [rising_index[-1] * 0.5]
         self.assertIn("200일 평균 아래", strategy.decide(tqqq(crashed))[1])
+
+    def test_the_band_dip_buys_below_the_lower_band_and_sells_at_the_middle(self):
+        # 볼린저 자리는 하단 아래에서만 사고, 중간값(20일 평균)을 되찾으면 팝니다.
+        # +3%에 팔면 이기는 폭이 지는 폭보다 작아져 승률이 높아도 합치면 잃습니다.
+        wobbly = [100.0 + (3.0 if i % 2 else -3.0) for i in range(40)]  # 20일 평균 100
+
+        def soxl(price, held=False, closes=None):
+            return {
+                "code": "SOXL", "name": "SOXL", "market": "us", "currency": "USD",
+                "price": price, "closes": closes or wobbly, "index_closes": [],
+                "held": held, "qty": 5 if held else 0, "avg": 94.0 if held else 0,
+                "pnl_pct": (price / 94.0 - 1) * 100 if held else 0.0,
+                "cash": 10_000_000, "turnover": 9e8, "high_52w": 200.0,
+                "ai": {"decision": "buy", "reason": "눌린 자리"},
+            }
+
+        # 표준편차 3.0, 1.5σ 하단은 95.5. 그 위에서는 안 삽니다.
+        self.assertIn("볼린저 하단", strategy.decide(soxl(97.0))[1])
+        self.assertEqual(strategy.decide(soxl(94.0))[0], "buy")
+
+        # 들고 있을 때: +3%를 넘어도 20일 평균 아래면 안 팝니다.
+        self.assertEqual(strategy.decide(soxl(98.0, held=True))[0], "hold")
+        action, why = strategy.decide(soxl(100.5, held=True))
+        self.assertEqual(action, "sell")
+        self.assertIn("20일 평균", why)
+
+    def test_the_limits_include_the_dip_seats(self):
+        # 딥매수 자리는 최대 종목 수에 안 세므로 한도에 **따로 더해야** 합니다.
+        # 화면이 실제보다 적은 금액을 말하면, 파일을 못 여는 사람은 영영 모릅니다.
+        with (
+            mock.patch.object(strategy, "US_SYMBOLS", ["NVDA", "MSFT", "META", "SOXL", "TQQQ"]),
+            mock.patch.object(strategy, "US_BUY_AMOUNT", 2000),
+            mock.patch.object(strategy, "US_BUY_AMOUNTS", {"SOXL": 10_000}),
+            mock.patch.object(strategy, "DIP_BUY", {"SOXL": {}, "TQQQ": {}}),
+            mock.patch.object(strategy, "MAX_HOLDINGS", 3),
+        ):
+            caps = trade.limits()
+        # 돌파 3자리 $6,000 + SOXL $10,000 + TQQQ $2,000 = $18,000
+        self.assertIn("$18,000", caps["최대로 들어갈 수 있는 돈"])
+        self.assertIn("딥매수", caps["최대 종목 수"])
 
     def test_the_dip_slot_has_its_own_seat(self):
         # 딥 신호는 1년에 며칠뿐입니다. 그날 다른 종목이 자리를 붙들고 있으면
