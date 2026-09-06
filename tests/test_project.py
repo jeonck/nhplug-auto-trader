@@ -15,6 +15,7 @@ import board
 import broker
 import check
 import setup
+import review
 import strategy
 import telegram
 import trade
@@ -587,6 +588,37 @@ class IntegrationHelpersTests(unittest.TestCase):
             mock.patch.object(broker, "us_open_sells", return_value={"SOXL": [{"orr_no": "9", "qty": 5, "price": 20.6}]}),
         ):
             self.assertEqual(trade.rest_take_profit("500", held), [])
+
+    def test_the_backtest_assumes_the_stop_hit_first_when_both_did(self):
+        # 일봉에는 고가·저가만 있고 순서가 없습니다. 같은 날 익절선과 손절선에 다
+        # 닿았으면 좋은 쪽을 고르면 안 됩니다. 성적이 실제보다 좋아 보입니다.
+        def bar(day, low, high, close):
+            return {"date": day, "open": close, "high": high, "low": low, "close": close}
+
+        # 오르기만 하다가 산 다음 날 위아래로 크게 흔들린 종목.
+        rows = [bar(f"2026010{i}" if i < 10 else f"202601{i}", 100 + i, 100 + i, 100 + i)
+                for i in range(1, 41)]
+        rows[-1] = bar("20260140", 100.0, 200.0, 150.0)  # 익절선·손절선 둘 다 닿는 날
+
+        with mock.patch.object(review, "rules_say_buy", side_effect=lambda c, p: len(c) == 39):
+            trades, _ = review.simulate(
+                {"X": rows}, take_pct=3.0, stop_pcts={}, base_stop=-10.0,
+                budgets={}, base_budget=10_000, most=1,
+            )
+        self.assertEqual([t["이유"] for t in trades], ["손절"])
+
+    def test_the_backtest_counts_wins_and_losses_honestly(self):
+        trades = [
+            {"손익": 10.0, "수익률": 3.0, "산 날": "20260101", "판 날": "20260105"},
+            {"손익": -50.0, "수익률": -20.0, "산 날": "20260106", "판 날": "20260108"},
+            {"손익": -5.0, "수익률": -10.0, "산 날": "20260109", "판 날": "20260110"},
+        ]
+        got = review.score(trades)
+        # 이겨도 합치면 잃을 수 있습니다. 승률만 보면 안 된다는 것이 이 표의 요점입니다.
+        self.assertEqual(got["승률"], "33.3%")
+        self.assertEqual(got["총손익"], "$-45.00")
+        self.assertEqual(got["연속으로 진 최대 횟수"], 2)
+        self.assertEqual(got["가장 나빴던 거래"], "-20.00%")
 
     def test_the_buy_conditions_are_enforced_not_merely_requested(self):
         # 「사라」 세 줄이 INSTRUCTIONS 에만 있으면 클로드 코드가 대충 봐도 그냥 사집니다.

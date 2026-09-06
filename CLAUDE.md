@@ -31,6 +31,7 @@
 | **실전투자** | `/live` | 아래 「실전투자」 절차 |
 | **검사** / **점검** | `/check` | 테스트와 전략 검사를 돌리고 결과만 말하기 |
 | **한 번 돌려봐** | `/scan` | `schedule.txt` 대로 한 회차만 실행 |
+| **되돌아보기** / **평가** | — | `review.txt` 대로 하루를 정리하고, 고칠 것이 보이면 물어보기 |
 
 ## 이 저장소에서 쓰는 명령
 
@@ -41,6 +42,7 @@ python trade.py --scan            # 상황을 살피고 판단이 필요한 종�
 python trade.py --do <파일>       # 판단을 검증하고 주문 (한글이 깨지므로 반드시 파일로)
 python trade.py --preview         # 상황만 보여 줌. 주문하지 않음
 python trade.py --account         # 계좌·한도 확인. 주문하지 않음
+python review.py                  # 하루 되돌아보기 + 백테스트. 주문하지 않음
 python check.py                   # 전략 검사
 python -m unittest discover -s tests   # 프로젝트 자체 검사
 ```
@@ -168,6 +170,8 @@ python -m unittest discover -s tests   # 프로젝트 자체 검사
 | `check.py` | 전략 검사 |
 | `telegram.py` | 실거래 주문을 Telegram에서 한 번 승인 |
 | `schedule.txt` | 예약에 넣을 글. 화면·문서·cron이 이 파일 하나를 씁니다 |
+| `review.py` | 하루 되돌아보기 + 백테스트. **주문하지 않습니다** |
+| `review.txt` | 하루 되돌아보기 예약에 넣을 글 |
 
 **판단은 클로드 코드가, 주문은 코드가 냅니다.** 예산·지정가·승인·재시도 금지는
 `trade.py --do` 가 판단과 무관하게 다시 검증합니다. `broker.py` 를 직접 부르거나

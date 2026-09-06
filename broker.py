@@ -378,8 +378,12 @@ def us_name(ticker):
     return us_quote(ticker)["name"]
 
 
-def us_closes(ticker, days=20):
-    """최근 일봉 종가를 오래된 것부터."""
+def us_bars(ticker, days=20):
+    """최근 일봉을 오래된 것부터. [{"date","open","high","low","close"}, …]
+
+    종가만으로는 그날 익절선이나 손절선에 닿았는지 알 수 없습니다. 고가·저가가 있어야
+    되돌아보기(review.py)가 "그날 팔렸을 것"을 판정할 수 있습니다.
+    """
     today = datetime.datetime.now(NEW_YORK).strftime("%Y%m%d")
     out = _call(
         "/gbstock/quote/v1/period",
@@ -395,14 +399,26 @@ def us_closes(ticker, days=20):
         },
         live_read=True,
     )
-    rows = out.get("Output_1") or []
-    values = [
-        (str(r.get("trade_date") or r.get("bsop_date") or ""), float(r.get("close_prc") or 0))
-        for r in rows
-    ]
-    values = [(d, p) for d, p in values if d and p > 0]
-    values.sort()
-    return [round(p, 2) for _, p in values]
+    bars = []
+    for row in out.get("Output_1") or []:
+        day = str(row.get("trade_date") or row.get("bsop_date") or "")
+        close = float(row.get("close_prc") or 0)
+        if not day or close <= 0:
+            continue
+        bars.append({
+            "date": day,
+            "open": round(float(row.get("open_prc") or close), 2),
+            "high": round(float(row.get("high") or close), 2),
+            "low": round(float(row.get("low") or close), 2),
+            "close": round(close, 2),
+        })
+    bars.sort(key=lambda b: b["date"])
+    return bars
+
+
+def us_closes(ticker, days=20):
+    """최근 일봉 종가를 오래된 것부터."""
+    return [bar["close"] for bar in us_bars(ticker, days)]
 
 
 def us_holdings(act):
