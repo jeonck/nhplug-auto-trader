@@ -108,6 +108,10 @@ US_SESSIONS = ["regular"]  # 미국을 볼 시간대: "pre" 프리마켓 · "reg
 INSTRUCTIONS = """너는 오르고 있는 흐름에 올라타는 추세추종 투자자야.
 바닥을 맞히려 하지 마라. 이미 올라가고 있는 것을 확인하고 따라 들어간다.
 
+아래 「사라」의 네 줄은 부탁이 아니라 **규칙이 강제한다.** 못 채운 종목은 네가
+buy라고 해도 안 사진다. 그러니 그 네 줄은 최소 조건일 뿐이라고 생각하고, 그것을
+채운 종목 안에서 뉴스와 흐름을 보고 정말 살 만한지를 골라라.
+
 사라:
 - 현재가가 5일 이동평균과 20일 이동평균을 모두 넘었을 때만
 - 5일 이동평균이 20일 이동평균 위에 있을 때만 (흐름의 방향이 위)
@@ -149,6 +153,9 @@ MIN_TURNOVER_USD = 50_000_000  # 미국 하루 거래대금 5천만 달러 미�
 # 정작 사려던 돌파를 놓칩니다. 120은 "52주 최고가보다 20% 넘게 뛴 값이면 사지 않는다"는
 # 뜻입니다. 정상적인 돌파는 통과하고, 하루에 미친 듯이 솟은 자리만 거릅니다.
 MAX_NEAR_HIGH_PCT = 120.0
+
+# 이만큼 달아오른 것은 사지 않습니다. 아래 「사라」의 RSI 줄과 같은 값입니다.
+RSI_TOO_HOT = 70.0
 
 
 def decide(m):
@@ -198,6 +205,35 @@ def why_not_buy(m):
     high = m.get("high_52w")
     if high and m["price"] >= high * MAX_NEAR_HIGH_PCT / 100:
         return f"52주 최고 {money(high, m)}에 가까워 지금은 사지 않습니다"
+
+    # 돌파 조건은 부탁이 아니라 규칙입니다. INSTRUCTIONS 에만 적어 두면 클로드 코드가
+    # 성실히 읽어 주기를 바라는 것뿐이고, 어느 회차에 대충 보면 그냥 사집니다.
+    # 여기서 걸면 판단을 묻기 전에 한 번, 주문 직전에 또 한 번 걸립니다.
+    closes = [float(c) for c in (m.get("closes") or [])]
+    price = m["price"]
+
+    quick, slow = moving_average(closes, 5), moving_average(closes, 20)
+    if quick is None or slow is None:
+        return "이동평균을 낼 만큼 시세가 쌓이지 않아 사지 않습니다"
+    if price < quick or price < slow:
+        return (
+            f"아직 평균을 넘지 못했습니다 "
+            f"(현재가 {money(price, m)} · 5일 {money(quick, m)} · 20일 {money(slow, m)})"
+        )
+    if quick < slow:
+        return f"5일 평균 {money(quick, m)}이 20일 평균 {money(slow, m)} 아래라 흐름이 위가 아닙니다"
+
+    line, signal = macd(closes)
+    if line is None:
+        return "MACD를 낼 만큼 시세가 쌓이지 않아 사지 않습니다"
+    if line <= signal:
+        return f"MACD {line:,.1f}이 신호선 {signal:,.1f} 아래라 아직 올라타지 않습니다"
+
+    strength = rsi(closes)
+    if strength is None:
+        return "RSI를 낼 만큼 시세가 쌓이지 않아 사지 않습니다"
+    if strength > RSI_TOO_HOT:
+        return f"RSI {strength}로 이미 달아올라 지금 들어가지 않습니다"
     return None
 
 

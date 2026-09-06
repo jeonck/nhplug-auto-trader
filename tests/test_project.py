@@ -588,6 +588,40 @@ class IntegrationHelpersTests(unittest.TestCase):
         ):
             self.assertEqual(trade.rest_take_profit("500", held), [])
 
+    def test_the_buy_conditions_are_enforced_not_merely_requested(self):
+        # 「사라」 세 줄이 INSTRUCTIONS 에만 있으면 클로드 코드가 대충 봐도 그냥 사집니다.
+        # 규칙이 막아야 합니다. 클로드 코드가 buy 라고 해도요.
+        rising = [100.0 + i for i in range(60)]  # 5일 > 20일, MACD 양수, RSI 100
+
+        def stock(**over):
+            m = {
+                "code": "TEST", "name": "테스트", "market": "us", "currency": "USD",
+                "price": rising[-1], "closes": rising, "held": False, "qty": 0, "avg": 0,
+                "pnl_pct": 0.0, "cash": 10_000_000, "turnover": 9e8, "high_52w": 1e9,
+                "ai": {"decision": "buy", "reason": "사고 싶다"},
+            }
+            m.update(over)
+            return m
+
+        # 계속 오르기만 한 줄은 RSI가 100입니다. 달아오른 데 들어가지 않습니다.
+        self.assertEqual(strategy.decide(stock())[0], "hold")
+
+        # 현재가가 평균 아래면 아직 돌파가 아닙니다.
+        wobbly = rising[:-1] + [rising[-1] - 30]
+        self.assertIn("평균을 넘지 못했습니다", strategy.decide(stock(closes=wobbly, price=wobbly[-1]))[1])
+
+        # 흐름이 아래로 꺾이면 MACD가 신호선 아래로 갑니다.
+        falling = [160.0 - i for i in range(60)]
+        self.assertEqual(strategy.decide(stock(closes=falling, price=falling[-1]))[0], "hold")
+
+        # 시세가 모자라면 확인할 수가 없습니다. 모르는 채로 사지 않습니다.
+        self.assertIn("쌓이지 않아", strategy.decide(stock(closes=rising[:10], price=109.0))[1])
+
+        # 세 줄을 다 채우면 그때는 클로드 코드의 판단대로 삽니다.
+        # 오르내리며 오르는 줄이라야 RSI가 100이 안 됩니다. 실제 주가가 그렇습니다.
+        calm = [100.0 + i * 0.5 + (1.2 if i % 2 else -1.2) for i in range(60)]
+        self.assertEqual(strategy.decide(stock(closes=calm, price=calm[-1]))[0], "buy")
+
     def test_stop_loss_is_reserved_ahead_and_cleaned_up_when_sold(self):
         # 손절은 지정가로 미리 못 겁니다. STOP 예약으로 걸고, 안 들고 있으면 치웁니다.
         held = {"SOXL": {"name": "SOXL", "qty": 5, "avg": 20.0, "pnl_pct": 0.0}}
