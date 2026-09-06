@@ -589,6 +589,90 @@ class IntegrationHelpersTests(unittest.TestCase):
         ):
             self.assertEqual(trade.rest_take_profit("500", held), [])
 
+    def test_the_dip_slot_buys_the_fall_not_the_breakout(self):
+        # 딥매수 자리는 정반대 규칙입니다. 돌파 조건에 걸리면 영영 못 삽니다.
+        # 그리고 판단 기준은 이 종목이 아니라 지수여야 합니다. 3배 상품은 자기
+        # 200일선이 지수와 어긋나서, 실제로 사야 할 날을 놓친 적이 있습니다.
+        falling = [100.0 - i * 0.3 for i in range(60)]  # 돌파 조건은 전부 실패하는 줄
+        rising_index = [200.0 + i for i in range(260)]  # 지수는 200일선 위
+
+        def tqqq(index, **over):
+            m = {
+                "code": "TQQQ", "name": "TQQQ", "market": "us", "currency": "USD",
+                "price": falling[-1], "closes": falling, "index_closes": index,
+                "held": False, "qty": 0, "avg": 0, "pnl_pct": 0.0, "cash": 10_000_000,
+                "turnover": 9e8, "high_52w": 200.0,
+                "ai": {"decision": "buy", "reason": "눌린 자리"},
+            }
+            m.update(over)
+            return m
+
+        # 지수가 고점 근처면 아직 안 삽니다.
+        self.assertIn("덜 빠졌습니다", strategy.decide(tqqq(rising_index))[1])
+
+        # 지수가 -10% 넘게 빠졌고 200일선 위면 삽니다. 이 종목의 이동평균·MACD·RSI는
+        # 전부 아래를 보고 있어도 상관없습니다. 그것이 딥매수입니다.
+        dipped = rising_index + [rising_index[-1] * 0.88]
+        self.assertEqual(strategy.decide(tqqq(dipped))[0], "buy")
+
+        # 200일선 아래면 눌린 자리가 아니라 무너지는 자리입니다. 사지 않습니다.
+        crashed = rising_index + [rising_index[-1] * 0.5]
+        self.assertIn("200일 평균 아래", strategy.decide(tqqq(crashed))[1])
+
+    def test_the_dip_slot_has_its_own_seat(self):
+        # 딥 신호는 1년에 며칠뿐입니다. 그날 다른 종목이 자리를 붙들고 있으면
+        # 그 해의 기회가 통째로 사라집니다. 실제 데이터에서 그렇게 지나갔습니다.
+        full = {"NVDA": {}, "MSFT": {}, "META": {}}  # 최대 종목 수를 이미 채운 상태
+        m = {
+            "code": "TQQQ", "name": "TQQQ", "market": "us", "currency": "USD",
+            "price": 50.0, "held": False, "qty": 0,
+        }
+        with (
+            mock.patch.object(strategy, "MAX_HOLDINGS", 3),
+            mock.patch.object(strategy, "DIP_BUY", {"TQQQ": {"entry_dip": -10.0, "index_sma_days": 200}}),
+            mock.patch.object(broker, "MOCK", True),
+            mock.patch.object(broker, "us_session", return_value="regular"),
+            mock.patch.object(broker, "us_buyable", return_value=40),
+            mock.patch.object(broker, "us_order", return_value="11"),
+        ):
+            self.assertIn("주문번호", trade.buy("500", m, dict(full), "눌린 자리"))
+            # 딥 자리가 아닌 종목은 그대로 막힙니다.
+            other = dict(m, code="AVGO", name="브로드컴")
+            self.assertIn("최대", trade.buy("500", other, dict(full), "돌파"))
+
+    def test_the_dip_slot_takes_profit_at_the_old_high_not_at_a_percent(self):
+        # +3%에 팔아 버리면 전고점 회복까지 기다리는 전략이 성립하지 않습니다.
+        def held(price):
+            return {
+                "code": "TQQQ", "name": "TQQQ", "market": "us", "currency": "USD",
+                "price": price, "closes": [100.0] * 60, "index_closes": [],
+                "held": True, "qty": 10, "avg": 60.0,
+                "pnl_pct": (price / 60.0 - 1) * 100, "cash": 0,
+                "turnover": 9e8, "high_52w": 88.0, "ai": None,
+            }
+
+        # +3%를 넘어도 안 팝니다.
+        self.assertEqual(strategy.decide(held(70.0))[0], "hold")
+        # 52주 고점을 회복하면 그때 팝니다.
+        action, why = strategy.decide(held(88.5))
+        self.assertEqual(action, "sell")
+        self.assertIn("52주 고점", why)
+        # 손절선은 그대로 삽니다.
+        self.assertEqual(strategy.decide(held(41.0))[0], "sell")
+
+    def test_no_percent_take_profit_order_is_rested_for_the_dip_slot(self):
+        # 걸어 두는 익절 주문도 마찬가지입니다. TQQQ에 +3% 매도를 걸면 안 됩니다.
+        held = {"TQQQ": {"name": "TQQQ", "qty": 10, "avg": 60.0, "pnl_pct": 0.0}}
+        with (
+            mock.patch.object(strategy, "US_SYMBOLS", ["TQQQ"]),
+            mock.patch.object(strategy, "TAKE_PROFIT_PCT", 3.0),
+            mock.patch.object(strategy, "TAKE_PROFIT_PCTS", {"TQQQ": None}),
+            mock.patch.object(broker, "us_session", return_value="regular"),
+            mock.patch.object(broker, "us_open_sells", return_value={}),
+            mock.patch.object(broker, "us_order", side_effect=AssertionError("걸면 안 됨")),
+        ):
+            self.assertEqual(trade.rest_take_profit("500", held), [])
+
     def test_the_backtest_assumes_the_stop_hit_first_when_both_did(self):
         # 일봉에는 고가·저가만 있고 순서가 없습니다. 같은 날 익절선과 손절선에 다
         # 닿았으면 좋은 쪽을 고르면 안 됩니다. 성적이 실제보다 좋아 보입니다.
@@ -600,7 +684,7 @@ class IntegrationHelpersTests(unittest.TestCase):
                 for i in range(1, 41)]
         rows[-1] = bar("20260140", 100.0, 200.0, 150.0)  # 익절선·손절선 둘 다 닿는 날
 
-        with mock.patch.object(review, "rules_say_buy", side_effect=lambda c, p: len(c) == 39):
+        with mock.patch.object(review, "rules_say_buy", side_effect=lambda c, p, *a: len(c) == 39):
             trades, _ = review.simulate(
                 {"X": rows}, take_pct=3.0, stop_pcts={}, base_stop=-10.0,
                 budgets={}, base_budget=10_000, most=1,

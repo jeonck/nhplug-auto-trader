@@ -93,29 +93,42 @@ def today(now=None):
 
 
 # ── 백테스트 ──────────────────────────────────────────────────────────
-def rules_say_buy(closes, price):
+def rules_say_buy(closes, price, code="", index=()):
     """지금 규칙이 이 종목을 살 만하다고 보는가. strategy.why_not_buy 를 그대로 씁니다.
 
     거래대금과 52주는 여기서 못 재므로 통과시킵니다. 우리가 보는 종목은 전부
     거래가 많고, 52주 조건은 실제 운영에서 따로 걸립니다.
+
+    딥매수 자리는 지수를 봐야 하므로 index 를 같이 넘깁니다. 안 넘기면 그 종목은
+    "판단할 수 없다"로 걸려서 백테스트에서 조용히 빠집니다.
     """
     m = {
+        "code": code,
         "currency": "USD",
         "price": price,
         "closes": closes,
+        "index_closes": list(index),
         "turnover": float("inf"),
         "high_52w": None,
     }
     return strategy.why_not_buy(m) is None
 
 
-def simulate(bars, take_pct, stop_pcts, base_stop, budgets, base_budget, most):
+def simulate(bars, take_pct, stop_pcts, base_stop, budgets, base_budget, most,
+             index_closes=(), take_pcts=None):
     """규칙대로 사고팔았다면 어떻게 됐을지. 거래 목록을 돌려줍니다.
 
     하루 안의 순서를 모르므로, 같은 날 두 선에 다 닿으면 **손절이 먼저**였다고 봅니다.
+
+    딥매수 자리(strategy.DIP_BUY)는 규칙이 달라서 따로 다룹니다. 살 때는 지수를 보고,
+    팔 때는 %가 아니라 **자기 52주 고점 회복**을 봅니다.
     """
+    take_pcts = take_pcts or {}
+    dip = getattr(strategy, "DIP_BUY", {})
     days = sorted({bar["date"] for rows in bars.values() for bar in rows})
     index = {t: {bar["date"]: i for i, bar in enumerate(rows)} for t, rows in bars.items()}
+    idx_at = {day: i for i, (day, _) in enumerate(index_closes)}
+    idx_px = [close for _, close in index_closes]
 
     open_now, trades = {}, []
     for day in days:
@@ -126,7 +139,13 @@ def simulate(bars, take_pct, stop_pcts, base_stop, budgets, base_budget, most):
                 continue
             bar, pos = bars[ticker][i], open_now[ticker]
             stop = pos["avg"] * (1 + stop_pcts.get(ticker, base_stop) / 100)
-            target = pos["avg"] * (1 + take_pct / 100)
+            if ticker in dip:
+                # 어제까지의 52주 고점을 되찾으면 익절. %로는 팔지 않습니다.
+                past = [b["close"] for b in bars[ticker][max(0, i - 252): i]]
+                target = max(past) if past else float("inf")
+            else:
+                pct = take_pcts.get(ticker, take_pct)
+                target = pos["avg"] * (1 + pct / 100) if pct else float("inf")
             out = stop if bar["low"] <= stop else (target if bar["high"] >= target else None)
             if out is None:
                 continue
@@ -142,14 +161,18 @@ def simulate(bars, take_pct, stop_pcts, base_stop, budgets, base_budget, most):
 
         # 2) 빈 자리가 있으면 규칙에 맞는 것을 삽니다.
         for ticker, rows in bars.items():
-            if len(open_now) >= most or ticker in open_now:
+            if ticker in open_now:
+                continue
+            # 딥매수 자리는 최대 종목 수에 넣지 않습니다(trade.buy 와 같은 규칙).
+            if ticker not in dip and len([t for t in open_now if t not in dip]) >= most:
                 continue
             i = index[ticker].get(day)
             if i is None or i < WARMUP:
                 continue
             closes = [b["close"] for b in rows[: i + 1]]
             price = rows[i]["close"]
-            if not rules_say_buy(closes, price):
+            upto = idx_px[: idx_at[day] + 1] if day in idx_at else []
+            if not rules_say_buy(closes, price, ticker, upto):
                 continue
             qty = int(budgets.get(ticker, base_budget) // price)
             if qty < 1:
@@ -213,13 +236,21 @@ def backtest(days=250, sweep=True):
         return {"메모": "일봉을 충분히 받지 못했습니다"}
 
     take = getattr(strategy, "TAKE_PROFIT_PCT", 0)
+    take_pcts = dict(getattr(strategy, "TAKE_PROFIT_PCTS", {}))
     base_stop = getattr(strategy, "STOP_LOSS_PCT", 0)
     stop_pcts = dict(getattr(strategy, "STOP_LOSS_PCTS", {}))
     budgets = dict(getattr(strategy, "US_BUY_AMOUNTS", {}))
     base_budget = getattr(strategy, "US_BUY_AMOUNT", 0)
     most = getattr(strategy, "MAX_HOLDINGS", 1)
 
-    trades, holding = simulate(bars, take, stop_pcts, base_stop, budgets, base_budget, most)
+    # 딥매수 자리는 지수를 봐야 판단이 됩니다. 안 넘기면 그 종목이 조용히 빠집니다.
+    index_closes = []
+    name = getattr(strategy, "MARKET_INDEX", "")
+    if name and getattr(strategy, "DIP_BUY", {}):
+        index_closes = [(b["date"], b["close"]) for b in broker.us_bars(name, days)]
+
+    trades, holding = simulate(bars, take, stop_pcts, base_stop, budgets, base_budget, most,
+                               index_closes, take_pcts)
     out = {
         "기간": f"{min(r[0]['date'] for r in bars.values())} ~ {max(r[-1]['date'] for r in bars.values())}",
         "종목": sorted(bars),
@@ -236,7 +267,8 @@ def backtest(days=250, sweep=True):
             for s_pct in (-8.0, -10.0, -15.0, -20.0, -30.0):
                 # 종목별 손절선도 같은 비율로 함께 움직입니다(SOXL은 늘 두 배로 넓게).
                 scaled = {k: v / base_stop * s_pct for k, v in stop_pcts.items()} if base_stop else {}
-                got, _ = simulate(bars, t_pct, scaled, s_pct, budgets, base_budget, most)
+                got, _ = simulate(bars, t_pct, scaled, s_pct, budgets, base_budget, most,
+                                  index_closes, take_pcts)
                 if got:
                     table.append({
                         "익절": f"+{t_pct}%", "손절": f"{s_pct}%",

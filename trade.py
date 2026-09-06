@@ -133,6 +133,33 @@ def _extra_facts(m):
         return []
 
 
+_INDEX = None
+
+
+def index_closes():
+    """전략이 시장 상태를 볼 기준 종목의 종가. **이 종목은 매매하지 않습니다.**
+
+    레버리지 ETF는 자기 숫자로 시장을 읽으면 틀립니다. QQQM이 200일선 위인 날에도
+    TQQQ는 자기 200일선 아래인 일이 실제로 있었습니다(2026-07-29). 그날 진입을
+    통째로 놓칩니다. 그래서 기준이 되는 종목을 따로 봅니다.
+
+    회차마다 한 번만 받습니다. 전략이 MARKET_INDEX 를 안 정했으면 받지 않습니다.
+    """
+    global _INDEX
+    if _INDEX is not None:
+        return _INDEX
+    name = getattr(strategy, "MARKET_INDEX", "")
+    if not name:
+        _INDEX = []
+        return _INDEX
+    try:
+        _INDEX = broker.us_closes(name, CANDLE_DAYS)
+    except Exception as exc:  # 못 받아도 나머지는 굴러가야 합니다.
+        log(f"  시장 기준({name}) 시세를 받지 못했습니다: {exc}")
+        _INDEX = []
+    return _INDEX
+
+
 def context(market, code, held, cash):
     """strategy.decide()에 넘길 종목 상태. 국내·미국이 같은 모양으로 나옵니다.
 
@@ -169,6 +196,8 @@ def context(market, code, held, cash):
         "cash": cash,
         # 사고팔지는 클로드 코드가 정합니다. --do 가 넘겨 준 판단이 여기 들어옵니다.
         "ai": None,
+        # 시장 기준 종목(MARKET_INDEX)의 종가. 레버리지 ETF가 지수를 보고 판단할 때 씁니다.
+        "index_closes": index_closes() if market == "us" else [],
     }
     return m
 
@@ -511,9 +540,10 @@ def rest_take_profit(act, held, dry=False):
     깨어 있지 않아도 됩니다. 손절은 이렇게 못 합니다. 지금 값보다 아래에 파는
     주문을 걸면 그 자리에서 바로 팔려 버리기 때문입니다.
     """
-    pct = getattr(strategy, "TAKE_PROFIT_PCT", 0)
+    base = getattr(strategy, "TAKE_PROFIT_PCT", 0)
+    per_symbol = getattr(strategy, "TAKE_PROFIT_PCTS", {})
     # 연장 세션에 건 지정가는 그 세션에서만 살아 있습니다. 정규장에서만 겁니다.
-    if pct <= 0 or broker.us_session() != "regular":
+    if base <= 0 or broker.us_session() != "regular":
         return []
 
     # 이미 걸린 것을 못 읽으면 두 번 걸 수 있습니다. 그럴 바에는 이번 회차를 쉽니다.
@@ -526,6 +556,10 @@ def rest_take_profit(act, held, dry=False):
     for ticker in getattr(strategy, "US_SYMBOLS", []):
         row = held.get(ticker)
         if not row or resting.get(ticker):
+            continue
+        # 익절선이 None인 종목은 %로 팔지 않습니다(전고점 회복까지 기다리는 자리).
+        pct = per_symbol.get(ticker, base)
+        if not pct or pct <= 0:
             continue
         avg, qty = float(row.get("avg") or 0), int(row.get("qty") or 0)
         if avg <= 0 or qty < 1:
@@ -688,9 +722,15 @@ def buy(act, m, held, reason=""):
     if m["held"]:
         log("    이미 보유 중이라 사지 않습니다")
         return "이미 보유 중이라 사지 않음"
-    if len(held) >= strategy.MAX_HOLDINGS:
-        log(f"    최대 {strategy.MAX_HOLDINGS}종목까지만 들고 갑니다")
-        return f"최대 {strategy.MAX_HOLDINGS}종목까지라 사지 않음"
+    # 딥매수 자리는 최대 종목 수에 넣지 않습니다. 신호가 1년에 며칠뿐이라, 그날
+    # 다른 종목이 자리를 붙들고 있으면 그 해의 기회가 통째로 사라집니다. 실제로
+    # 지난 1년의 유일한 딥(2026-07-29)이 자리 부족으로 그냥 지나갔습니다.
+    dip = getattr(strategy, "DIP_BUY", {})
+    if m["code"] not in dip:
+        others = [code for code in held if code not in dip]
+        if len(others) >= strategy.MAX_HOLDINGS:
+            log(f"    최대 {strategy.MAX_HOLDINGS}종목까지만 들고 갑니다")
+            return f"최대 {strategy.MAX_HOLDINGS}종목까지라 사지 않음"
 
     price = m["price"]
     if m["market"] == "us":

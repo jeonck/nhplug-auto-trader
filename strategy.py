@@ -93,13 +93,28 @@ decide()에 들어오는 m의 내용:
 
 # ── 무엇을 얼마나 살지 ───────────────────────────────────────────────
 SYMBOLS = []  # 국내는 하지 않습니다. 하려면 6자리 종목코드를 넣으세요
-# 미국: 엔비디아 · 마이크로소프트 · 메타 · 테슬라 · 브로드컴 · SOXL(반도체 3배 ETF)
-US_SYMBOLS = ["NVDA", "MSFT", "META", "TSLA", "AVGO", "SOXL"]
+# 미국: 엔비디아 · 마이크로소프트 · 메타 · 테슬라 · 브로드컴 · SOXL(반도체 3배)
+#      · TQQQ(나스닥100 3배) — 이 종목만 딥매수 규칙으로 굴립니다. 아래 DIP_BUY 참고
+US_SYMBOLS = ["NVDA", "MSFT", "META", "TSLA", "AVGO", "SOXL", "TQQQ"]
+# 시장 상태를 볼 기준 종목. **사고팔지 않습니다.** 레버리지 ETF는 자기 200일선으로
+# 시장을 읽으면 틀립니다(변동성 때문에 지수와 어긋납니다). 지수를 직접 봅니다.
+MARKET_INDEX = "QQQM"
 BUY_AMOUNT = 300_000  # 국내 한 종목에 넣을 금액(원). 국내를 안 하므로 쓰이지 않습니다
 US_BUY_AMOUNT = 2000  # 미국 한 종목에 넣을 금액(달러). 약 290만원(환율 1,450원 기준)
 # 종목마다 금액을 달리 하고 싶을 때만 적습니다. 없는 종목은 위 US_BUY_AMOUNT를 씁니다.
 US_BUY_AMOUNTS = {"SOXL": 10000}  # SOXL 한 자리 $10,000 (약 1,450만원)
-MAX_HOLDINGS = 3  # 동시에 들고 갈 최대 종목 수 (국내·미국 합쳐서)
+# 딥매수로 굴릴 종목. 여기 있는 종목은 위 「사라」의 돌파 조건을 **쓰지 않습니다.**
+# 오르는 것을 사는 것이 아니라 **떨어진 것을 사기** 때문에 정반대 규칙입니다.
+#
+#   진입  MARKET_INDEX 가 52주 고점 대비 entry_dip 이하로 빠졌고, 그러면서도
+#         200일선 위일 것 (추세는 살아 있는데 눌린 자리만 삽니다)
+#   익절  그 종목이 **자기 52주 고점을 회복**하면 팝니다. %가 아니라 값입니다
+#   손절  STOP_LOSS_PCTS 의 값 (아래)
+#
+# 200일선 조건이 핵심입니다. 이것을 빼면 진짜 하락장에서 3배 상품을 계속 사들이다
+# 원금이 녹습니다. 2000년·2008년이 그랬습니다.
+DIP_BUY = {"TQQQ": {"entry_dip": -10.0, "index_sma_days": 200}}
+MAX_HOLDINGS = 3  # 동시에 들고 갈 최대 종목 수 (딥매수 자리는 여기 안 셉니다)
 US_SESSIONS = ["regular"]  # 미국을 볼 시간대: "pre" 프리마켓 · "regular" 정규장 · "after" 애프터마켓
 
 # ── 클로드 코드에게 주는 투자 원칙 ─────────────────────────────────────────
@@ -132,6 +147,14 @@ SOXL은 반도체 지수를 3배로 따라가는 상품이다. 위 종목들이 
 이미 들고 있으면 SOXL을 더 얹는 것은 같은 자리에 세 번 거는 것이다. 그럴 때는
 hold 해라.
 
+TQQQ는 위 종목들과 **정반대 자리**다. 나스닥100을 3배로 따라가는 상품이고, 여기서는
+돌파를 사는 것이 아니라 **지수가 눌렸을 때 사는** 자리로 쓴다. 규칙이 알아서 걸러
+주니, 네게 물어보는 순간은 이미 "지수가 52주 고점 대비 10% 넘게 빠졌고 그런데도
+200일선 위"인 때다. 그때 네가 볼 것은 하나다 — **이번 하락이 눌림인가, 무너짐의
+시작인가.** 뉴스가 금리·실적·규제처럼 몇 달 갈 이야기를 하고 있으면 hold 해라.
+그리고 TQQQ는 몇 달을 들고 가는 자리라 며칠 흔들린다고 팔지 않는다. 파는 것은
+전고점을 되찾았을 때이고, 그것도 규칙이 한다.
+
 이유에는 위에서 본 숫자를 그대로 넣어라.
 자료가 없어 안 적힌 지표는 없는 셈 쳐라.
 애매하면 hold 해라.
@@ -146,7 +169,11 @@ TAKE_PROFIT_PCT = 3.0  # 이만큼 오르면 묻지 않고 익절
 # 종목마다 손절선을 달리 하고 싶을 때만 적습니다. 없는 종목은 위 STOP_LOSS_PCT를 씁니다.
 # SOXL은 반도체 지수를 3배로 따라가서 하루 9% 움직임이 흔합니다. -10%면 흐름이
 # 안 꺾였는데도 거의 매번 잘립니다. 그래서 SOXL만 기본의 두 배로 넓게 잡습니다.
-STOP_LOSS_PCTS = {"SOXL": -40.0}
+STOP_LOSS_PCTS = {"SOXL": -40.0, "TQQQ": -30.0}
+# 종목마다 익절선을 달리 하고 싶을 때만 적습니다. None이면 %로는 익절하지 않습니다.
+# TQQQ는 몇 달을 들고 전고점 회복까지 기다리는 자리라, +3%에 팔면 전략이 성립하지
+# 않습니다. 그래서 % 익절을 끄고 decide()가 값으로 판단합니다.
+TAKE_PROFIT_PCTS = {"TQQQ": None}
 
 # 크게 버는 규칙보다 크게 잃지 않는 규칙이 오래갑니다.
 MIN_TURNOVER_KRW = 10_000_000_000  # 국내 하루 거래대금 100억 미만이면 안 삼
@@ -171,7 +198,16 @@ def decide(m):
         stop = STOP_LOSS_PCTS.get(m["code"], STOP_LOSS_PCT)
         if m["pnl_pct"] <= stop:
             return "sell", f"손절 기준 {stop}% 도달 (현재 {m['pnl_pct']:+.2f}%)"
-        if m["pnl_pct"] >= TAKE_PROFIT_PCT:
+
+        if m["code"] in DIP_BUY:
+            # 딥매수 자리는 %가 아니라 값으로 팝니다. 52주 고점을 되찾으면 끝입니다.
+            high = m.get("high_52w")
+            if high and m["price"] >= high:
+                return "sell", (
+                    f"52주 고점 {money(high, m)}을 회복해 익절합니다 "
+                    f"(현재 {m['pnl_pct']:+.2f}%)"
+                )
+        elif m["pnl_pct"] >= TAKE_PROFIT_PCT:
             return "sell", f"익절 기준 +{TAKE_PROFIT_PCT}% 도달 (현재 {m['pnl_pct']:+.2f}%)"
     else:
         skip = why_not_buy(m)
@@ -203,6 +239,10 @@ def why_not_buy(m):
         return "거래대금을 확인하지 못해 이번에는 사지 않습니다"
     if turnover < floor:
         return f"거래가 너무 적어 팔 때 곤란할 수 있습니다 (거래대금 {money(turnover, m)})"
+
+    # 딥매수 자리는 정반대 규칙입니다. 돌파를 기다리지 않고 눌린 자리를 삽니다.
+    if m["code"] in DIP_BUY:
+        return why_not_dip_buy(m)
 
     high = m.get("high_52w")
     if high and m["price"] >= high * MAX_NEAR_HIGH_PCT / 100:
@@ -239,6 +279,38 @@ def why_not_buy(m):
     return None
 
 
+def why_not_dip_buy(m):
+    """딥매수 자리를 지금 사면 안 되는 이유. 없으면 None.
+
+    보는 것은 이 종목이 아니라 **지수(MARKET_INDEX)** 입니다. 3배 상품은 변동성 때문에
+    자기 200일선이 지수와 어긋납니다. 실제로 지수는 200일선 위인데 3배 상품은 아래인
+    날이 있었고, 그날이 바로 사야 할 자리였습니다.
+    """
+    rule = DIP_BUY[m["code"]]
+    index = [float(c) for c in (m.get("index_closes") or [])]
+    days = rule["index_sma_days"]
+    if len(index) < days:
+        return f"지수({MARKET_INDEX}) 시세가 {days}일치도 없어 판단할 수 없습니다"
+
+    now = index[-1]
+    line = sum(index[-days:]) / days
+    if now < line:
+        return (
+            f"지수가 {days}일 평균 아래입니다. 하락장에서 3배 상품을 받으면 "
+            f"눌린 자리가 아니라 계속 떨어지는 자리입니다 (이격 {now / line - 1:+.1%})"
+        )
+
+    # 52주 고점은 지수 기준으로 봅니다. 최근 1년치가 없으면 있는 만큼만 씁니다.
+    high = max(index[-252:])
+    fall = (now / high - 1) * 100
+    if fall > rule["entry_dip"]:
+        return (
+            f"지수가 아직 덜 빠졌습니다 (52주 고점 대비 {fall:+.1f}%, "
+            f"{rule['entry_dip']:+.0f}% 이하여야 삽니다)"
+        )
+    return None
+
+
 def facts(m):
     """클로드 코드에게 더 보여 줄 사실. 여기서 돌려준 줄이 --scan 출력에 그대로 붙습니다.
 
@@ -259,6 +331,23 @@ def facts(m):
     if line is not None:
         # 차이의 부호가 곧 신호입니다. 양수면 신호선 위, 음수면 아래.
         lines.append(f"- MACD: {line:,.1f} · 신호선 {signal:,.1f} · 차이 {line - signal:+,.1f}")
+
+    # 딥매수 자리는 자기 지표가 아니라 지수를 보고 판단합니다. 그 숫자를 같이 넘깁니다.
+    index = [float(c) for c in (m.get("index_closes") or [])]
+    if m["code"] in DIP_BUY and index:
+        days = DIP_BUY[m["code"]]["index_sma_days"]
+        now, high = index[-1], max(index[-252:])
+        lines.append(f"- 이 종목은 딥매수 자리입니다. 돌파가 아니라 눌린 자리를 삽니다")
+        lines.append(f"- 지수({MARKET_INDEX}) 현재 {now:,.2f} · 52주 고점 {high:,.2f} "
+                     f"· 낙폭 {(now / high - 1) * 100:+.1f}% "
+                     f"(진입 기준 {DIP_BUY[m['code']]['entry_dip']:+.0f}%)")
+        if len(index) >= days:
+            avg = sum(index[-days:]) / days
+            lines.append(f"- 지수 {days}일 평균 {avg:,.2f} "
+                         f"({'위' if now >= avg else '아래'}, 이격 {now / avg - 1:+.1%})")
+        if m["held"] and m.get("high_52w"):
+            lines.append(f"- 익절은 이 종목이 자기 52주 고점 {money(m['high_52w'], m)}을 "
+                         f"회복할 때입니다. %로 팔지 않습니다")
     return lines
 
 
