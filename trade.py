@@ -617,6 +617,10 @@ def rest_stop_loss(act, held, dry=False):
     """
     if broker.us_session() != "regular":
         return []
+    if broker.MOCK:
+        # 모의투자 서버는 STOP 예약을 받지 않습니다("14040 모의투자 지정가만 가능합니다").
+        # 실거래에서는 됩니다. 그동안 손절은 회차마다 확인하는 쪽이 대신합니다.
+        return []
     try:
         resting = broker.us_reserved_stops(act)
     except Exception as exc:

@@ -788,11 +788,21 @@ class IntegrationHelpersTests(unittest.TestCase):
             mock.patch.object(strategy, "US_SYMBOLS", ["SOXL"]),
             mock.patch.object(strategy, "STOP_LOSS_PCT", -10.0),
             mock.patch.object(strategy, "STOP_LOSS_PCTS", {"SOXL": -20.0}),
+            mock.patch.object(broker, "MOCK", False),  # 모의투자는 STOP 예약을 안 받습니다
+            mock.patch.object(trade, "approved", return_value=""),
             mock.patch.object(broker, "us_session", return_value="regular"),
             mock.patch.object(broker, "us_reserved_stops", return_value={}),
             mock.patch.object(broker, "us_reserve_stop", side_effect=lambda *a: sent.append(a) or "7"),
         ):
             done = trade.rest_stop_loss("500", held)
+
+        # 모의투자 서버는 STOP 예약을 받지 않습니다. 헛되이 부르지 않습니다.
+        with (
+            mock.patch.object(broker, "MOCK", True),
+            mock.patch.object(broker, "us_session", return_value="regular"),
+            mock.patch.object(broker, "us_reserve_stop", side_effect=AssertionError("부르면 안 됨")),
+        ):
+            self.assertEqual(trade.rest_stop_loss("500", held), [])
         # SOXL은 -10%가 아니라 제 손절선 -20%를 씁니다. $20.00 의 -20% 는 $16.00.
         self.assertEqual(sent, [("500", "SOXL", 5, 16.0)])
         self.assertIn("$16.00", done[0]["한 일"])
@@ -801,6 +811,7 @@ class IntegrationHelpersTests(unittest.TestCase):
         cancelled = []
         with (
             mock.patch.object(strategy, "US_SYMBOLS", ["SOXL"]),
+            mock.patch.object(broker, "MOCK", False),
             mock.patch.object(broker, "us_session", return_value="regular"),
             mock.patch.object(broker, "us_reserved_stops",
                               return_value={"SOXL": [{"day": "20260908", "no": "7", "qty": 5, "stop": 16.0}]}),
