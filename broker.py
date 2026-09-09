@@ -505,7 +505,10 @@ def us_open_sells(act):
                 raise
             continue
         for row in rows:
-            ticker = str(row.get("iem_cd") or "").strip()
+            # 이 조회의 iem_cd 에는 티커가 아니라 ISIN(US67066G1040)이 들어옵니다.
+            # 티커는 tck_iem_cd 입니다. 잘못 읽으면 "이미 걸어 뒀는지"가 영영 안 맞아
+            # 회차마다 같은 매도 주문이 새로 쌓이고, 수량이 묶여 손절이 막힙니다.
+            ticker = str(row.get("tck_iem_cd") or row.get("iem_cd") or "").strip()
             left = int(float(row.get("ny_cns_orr_qty") or 0))
             order_no = str(row.get("orr_no") or "").strip()
             if not ticker or not order_no or left <= 0:
@@ -555,7 +558,8 @@ def us_reserved_stops(act):
                 raise
             continue
         for row in rows:
-            ticker = str(row.get("iem_cd") or "").strip()
+            # 미체결 조회와 마찬가지로 티커는 tck_iem_cd 쪽입니다.
+            ticker = str(row.get("tck_iem_cd") or row.get("iem_cd") or "").strip()
             if not ticker or str(row.get("orr_pdt_dit_cd") or "").strip() != "03":
                 continue
             result.setdefault(ticker, []).append({
@@ -603,7 +607,8 @@ def us_reserved_cancel(act, ticker, day, reserved_no):
             "act_no": act,
             "fc_mkt_dit_cd": US_NATION,
             "bkg_orr_dt": day,
-            "bkg_rtn_orr_no": reserved_no,
+            # 취소 계열은 주문번호를 숫자로 받습니다(us_cancel 참고).
+            "bkg_rtn_orr_no": int(str(reserved_no).strip()),
             "iem_cd": ticker,
             "orr_pdt_dit_cd": "03",
         },
@@ -611,13 +616,17 @@ def us_reserved_cancel(act, ticker, day, reserved_no):
 
 
 def us_cancel(act, ticker, order_no):
-    """걸어 둔 미국 주문을 통째로 취소합니다."""
+    """걸어 둔 미국 주문을 통째로 취소합니다.
+
+    주문번호는 **숫자로** 보내야 합니다. 조회는 "783"처럼 문자로 주는데, 취소에
+    그대로 넣으면 "org_orr_no 길이나 data type을 확인하세요"로 거절합니다.
+    """
     return (
         _call(
             "/gbstock/order/v1/cancel",
             {
                 "act_no": act,
-                "org_orr_no": order_no,
+                "org_orr_no": int(str(order_no).strip()),
                 "fc_sec_trd_nat_cd": US_NATION,
                 "iem_cd": ticker,
                 "all_pat_dit_cd": "1",  # 전체 취소
