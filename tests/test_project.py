@@ -583,13 +583,16 @@ class IntegrationHelpersTests(unittest.TestCase):
         self.assertEqual(sent[0][1:], ("sell", "NVDA", 5, 20.6, "00"))
         self.assertIn("$20.60", done[0]["한 일"])
 
+        # 이미 걸려 있으면 그 수량이 묶여 팔 수 있는 수량이 모자랍니다. 그때는 안 겁니다.
+        # 주문 조회로 판정하면 지난 날짜의 죽은 기록에 속습니다. 수량으로 봅니다.
         with (
             mock.patch.object(strategy, "US_SYMBOLS", ["NVDA"]),
             mock.patch.object(broker, "us_session", return_value="regular"),
+            mock.patch.object(broker, "us_sellable", return_value=0),
             mock.patch.object(broker, "us_order", side_effect=AssertionError("또 걸면 안 됨")),
-            mock.patch.object(broker, "us_open_sells", return_value={"NVDA": [{"orr_no": "9", "qty": 5, "price": 20.6}]}),
         ):
-            self.assertEqual(trade.rest_take_profit("500", held), [])
+            done = trade.rest_take_profit("500", held)
+        self.assertIn("이미 걸려 있거나", done[0]["한 일"])
 
     def test_the_dip_slot_buys_the_fall_not_the_breakout(self):
         # 딥매수 자리는 정반대 규칙입니다. 돌파 조건에 걸리면 영영 못 삽니다.
@@ -710,7 +713,7 @@ class IntegrationHelpersTests(unittest.TestCase):
             mock.patch.object(strategy, "TAKE_PROFIT_PCT", 3.0),
             mock.patch.object(strategy, "TAKE_PROFIT_PCTS", {"TQQQ": None}),
             mock.patch.object(broker, "us_session", return_value="regular"),
-            mock.patch.object(broker, "us_open_sells", return_value={}),
+            mock.patch.object(broker, "us_sellable", return_value=10),
             mock.patch.object(broker, "us_order", side_effect=AssertionError("걸면 안 됨")),
         ):
             self.assertEqual(trade.rest_take_profit("500", held), [])

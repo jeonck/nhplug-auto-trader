@@ -553,16 +553,10 @@ def rest_take_profit(act, held, dry=False):
     if base <= 0 or broker.us_session() != "regular":
         return []
 
-    # 이미 걸린 것을 못 읽으면 두 번 걸 수 있습니다. 그럴 바에는 이번 회차를 쉽니다.
-    try:
-        resting = broker.us_open_sells(act)
-    except Exception as exc:
-        log(f"  걸어 둔 매도 주문을 확인하지 못해 익절 예약을 건너뜁니다: {exc}")
-        return []
     out = []
     for ticker in getattr(strategy, "US_SYMBOLS", []):
         row = held.get(ticker)
-        if not row or resting.get(ticker):
+        if not row:
             continue
         # 익절선이 None인 종목은 %로 팔지 않습니다(전고점 회복까지 기다리는 자리).
         pct = per_symbol.get(ticker, base)
@@ -586,20 +580,24 @@ def rest_take_profit(act, held, dry=False):
             "pnl_pct": row.get("pnl_pct", 0.0),
         }
         try:
+            # **"이미 걸어 뒀는가"는 팔 수 있는 수량으로 판정합니다.** 주문 조회로
+            # 판정하면 지난 날짜의 죽은 기록에 속아 같은 익절을 또 겁니다(9/9 NVDA).
+            # 수량이 두 배로 묶이면 손절이 "0주"로 조용히 실패합니다.
+            # 가진 수량이 전부 자유로울 때만 새로 겁니다.
             sellable = broker.us_sellable(act, ticker, target, "00")
-            if sellable < 1:
-                out.append(noted(where, "당일 매수분이라 아직 걸 수 없습니다", reason))
+            if sellable < qty:
+                out.append(noted(where, "이미 걸려 있거나 당일 매수분이라 걸지 않습니다", reason))
                 continue
-            denied = approved(act, m, "sell", min(qty, sellable), target, reason)
+            denied = approved(act, m, "sell", qty, target, reason)
             if denied:
                 out.append(noted(where, denied, reason))
                 continue
-            order_no = broker.us_order(act, "sell", ticker, min(qty, sellable), target, "00")
+            order_no = broker.us_order(act, "sell", ticker, qty, target, "00")
         except Exception as exc:
             log(f"    익절 예약을 걸지 못했습니다: {exc}")
             out.append(noted(where, f"익절 예약 실패 · {exc}", reason))
             continue
-        out.append(noted(where, f"익절 매도 예약 {min(qty, sellable)}주 @ ${target:,.2f} · 주문번호 {order_no}", reason, "예약"))
+        out.append(noted(where, f"익절 매도 예약 {qty}주 @ ${target:,.2f} · 주문번호 {order_no}", reason, "예약"))
     return out
 
 

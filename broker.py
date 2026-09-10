@@ -513,6 +513,9 @@ def us_open_sells(act):
             order_no = str(row.get("orr_no") or "").strip()
             if not ticker or not order_no or left <= 0:
                 continue
+            # 같은 주문이 여러 날짜 조회에 겹쳐 나올 수 있습니다. 한 번만 셉니다.
+            if any(o["orr_no"] == order_no for o in result.get(ticker, [])):
+                continue
             result.setdefault(ticker, []).append({
                 "orr_no": order_no,
                 "qty": left,
@@ -521,14 +524,22 @@ def us_open_sells(act):
     return result
 
 
+LOOKBACK_DAYS = 3
+
+
 def _us_days():
-    """예약주문을 찾을 날짜들. 미국 정규장은 한국 날짜로 이틀에 걸칩니다."""
+    """걸어 둔 주문을 찾을 날짜들. 미국 정규장은 한국 날짜로 이틀에 걸칩니다.
+
+    **이 조회로 "지금 살아 있는 주문"을 판정하면 안 됩니다.** 지난 날짜로 물으면
+    그날 기준의 기록이 그대로 나옵니다. 이미 체결·소멸한 주문도 미체결로 보입니다.
+    취소를 걸어 보면 "원주문번호가 존재하지 않습니다"로 돌아옵니다.
+    지금 무엇이 묶여 있는지는 us_sellable 로 봐야 정확합니다.
+    """
     seoul = datetime.datetime.now(SEOUL)
-    return sorted({
-        seoul.strftime("%Y%m%d"),
-        (seoul - datetime.timedelta(days=1)).strftime("%Y%m%d"),
-        datetime.datetime.now(NEW_YORK).strftime("%Y%m%d"),
-    })
+    days = {(seoul - datetime.timedelta(days=n)).strftime("%Y%m%d")
+            for n in range(LOOKBACK_DAYS)}
+    days.add(datetime.datetime.now(NEW_YORK).strftime("%Y%m%d"))
+    return sorted(days)
 
 
 def us_reserved_stops(act):
