@@ -649,6 +649,29 @@ class IntegrationHelpersTests(unittest.TestCase):
         self.assertEqual(action, "sell")
         self.assertIn("20일 평균", why)
 
+    def test_the_score_counts_what_was_sold_not_only_what_is_held(self):
+        # 들고 있는 것의 손익만 보면 판 것이 안 보입니다. 얼마를 벌었는지는
+        # 판 것과 들고 있는 것을 합쳐야 나옵니다. 수수료도 빼고 셉니다.
+        ledger = [
+            {"종목": "AAA", "구분": "매수", "수량": 10, "단가": 100.0},
+            {"종목": "AAA", "구분": "매도", "수량": 10, "단가": 110.0},   # +100 에서 수수료
+            {"종목": "BBB", "구분": "매수", "수량": 5, "단가": 200.0},
+            {"종목": "BBB", "구분": "매도", "수량": 5, "단가": 180.0},    # -100 에서 수수료
+            {"종목": "CCC", "구분": "매수", "수량": 4, "단가": 50.0},     # 아직 들고 있음
+        ]
+        held = {"CCC": {"qty": 4, "avg": 50.0, "price": 60.0, "krw": 348_000}}
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "trades.json"
+            path.write_text(json.dumps(ledger, ensure_ascii=False), encoding="utf-8")
+            with mock.patch.object(trade, "LEDGER", path):
+                got = trade.performance(held)
+
+        self.assertIn("2번 · 1승 1패", got["판 것"])
+        self.assertEqual(got["이긴 비율"], "50%")
+        # 판 것 -1.81달러(수수료 때문에 딱 0이 아닙니다) + 들고 있는 것 +40달러
+        self.assertIn("$+40.00", got["들고 있는 것"])
+        self.assertIn("원)", got["합계"])  # 원화도 같이 적습니다
+
     def test_the_limits_include_the_dip_seats(self):
         # 딥매수 자리는 최대 종목 수에 안 세므로 한도에 **따로 더해야** 합니다.
         # 화면이 실제보다 적은 금액을 말하면, 파일을 못 여는 사람은 영영 모릅니다.

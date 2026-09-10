@@ -286,6 +286,8 @@ def portfolio(held, cash):
         "보유": rows,
         "종목수": f"{len(held)} / {strategy.MAX_HOLDINGS}",
         "주문가능현금": f"{cash:,}원",
+        # 들고 있는 것만 보면 판 것이 안 보입니다. 합쳐서 얼마인지가 진짜 성적입니다.
+        "성적": performance(held),
     }
     # 현금이 한 종목 예산보다 적으면 한 주도 못 삽니다. 그런데 화면에는 "주문이
     # 나간 것이 없습니다"라고만 나와서, 무엇이 잘못됐는지 알 수가 없었습니다.
@@ -296,6 +298,88 @@ def portfolio(held, cash):
             "지금 설정으로는 국내 주식을 한 주도 사지 못합니다. "
             "입금하시거나 한 종목 금액을 줄여야 합니다."
         )
+    return out
+
+
+LEDGER = Path(__file__).with_name(".cache") / "trades.json"
+FEE_RATE = 0.0009  # NH 해외주식 API 수수료 0.09% (한쪽마다)
+
+
+def record(m, side, qty, price):
+    """나간 주문을 남깁니다. **판 것까지 합친 성적을 내려면 이 기록이 있어야 합니다.**
+
+    모의투자 서버는 기간손익도 일별거래도 빈 값으로 줍니다. 실제로 얼마를 벌었는지
+    알 방법이 우리 기록밖에 없습니다.
+    """
+    try:
+        rows = json.loads(LEDGER.read_text(encoding="utf-8")) if LEDGER.exists() else []
+    except Exception:
+        rows = []
+    rows.append({
+        "시각": datetime.datetime.now(SEOUL).strftime("%Y-%m-%d %H:%M"),
+        "종목": m["code"], "이름": m.get("name") or m["code"],
+        "구분": side, "수량": int(qty), "단가": round(float(price), 4),
+        "통화": m.get("currency", "USD"),
+    })
+    try:
+        LEDGER.parent.mkdir(parents=True, exist_ok=True)
+        LEDGER.write_text(json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception as exc:  # 기록이 실패해도 매매는 계속되어야 합니다.
+        log(f"    거래 기록을 남기지 못했습니다: {exc}")
+
+
+def performance(held):
+    """지금까지의 성적. 판 것(실현)과 들고 있는 것(평가)을 나눠서 냅니다.
+
+    수수료는 양쪽 0.09%를 빼고 셉니다. 세금은 넣지 않았습니다.
+    """
+    try:
+        rows = json.loads(LEDGER.read_text(encoding="utf-8")) if LEDGER.exists() else []
+    except Exception:
+        rows = []
+
+    book, realized, wins, losses = {}, 0.0, 0, 0
+    for row in rows:
+        code, qty, price = row["종목"], row["수량"], row["단가"]
+        have = book.setdefault(code, {"qty": 0, "cost": 0.0})
+        if row["구분"] == "매수":
+            have["qty"] += qty
+            have["cost"] += qty * price * (1 + FEE_RATE)
+        elif have["qty"] > 0:
+            sold = min(qty, have["qty"])
+            avg = have["cost"] / have["qty"]
+            gain = sold * price * (1 - FEE_RATE) - sold * avg
+            realized += gain
+            wins, losses = (wins + 1, losses) if gain > 0 else (wins, losses + 1)
+            have["cost"] -= sold * avg
+            have["qty"] -= sold
+
+    # 들고 있는 것의 평가손익은 NH 잔고를 그대로 씁니다(환율·수수료가 이미 반영됨).
+    open_gain = sum(
+        (item.get("price", 0) - item.get("avg", 0)) * item.get("qty", 0)
+        for item in held.values() if item.get("avg")
+    )
+    # 달러만 보면 얼마인지 잘 안 잡힙니다. 잔고에 원화 평가액이 같이 오므로
+    # 거기서 환율을 얻어 원으로도 적어 줍니다. 잔고가 없으면 생략합니다.
+    rate = next(
+        (item["krw"] / (item["price"] * item["qty"])
+         for item in held.values()
+         if item.get("krw") and item.get("price") and item.get("qty")),
+        None,
+    )
+
+    def both(value):
+        return f"${value:+,.2f}" + (f" ({value * rate:+,.0f}원)" if rate else "")
+
+    done = wins + losses
+    out = {
+        "판 것": (f"{done}번 · {wins}승 {losses}패 · {both(realized)}" if done
+                 else "아직 판 것이 없습니다"),
+        "들고 있는 것": both(open_gain) if held else "없음",
+        "합계": both(realized + open_gain),
+    }
+    if done:
+        out["이긴 비율"] = f"{wins / done * 100:.0f}%"
     return out
 
 
@@ -763,6 +847,7 @@ def buy(act, m, held, reason=""):
     else:
         order_no = broker.order(act, "buy", m["code"], qty, price)
     log(f"    매수 주문 {qty}주 @ {money(price, m['currency'])} · 주문번호 {order_no}")
+    record(m, "매수", qty, price)
     telegram.notify(f"매수 전송: {m['name']} {qty}주 @ {money(price, m['currency'])}")
     held[m["code"]] = {"name": m["name"], "qty": qty, "avg": price, "price": price, "pnl_pct": 0.0}
     return f"매수 주문 {qty}주 @ {money(price, m['currency'])} · 주문번호 {order_no}"
@@ -802,6 +887,7 @@ def sell(act, m, reason=""):
     else:
         order_no = broker.order(act, "sell", m["code"], qty, price)
     log(f"    매도 주문 {qty}주 @ {money(price, m['currency'])} · 주문번호 {order_no}")
+    record(m, "매도", qty, price)
     telegram.notify(f"매도 전송: {m['name']} {qty}주 @ {money(price, m['currency'])}")
     return f"매도 주문 {qty}주 @ {money(price, m['currency'])} · 주문번호 {order_no}"
 

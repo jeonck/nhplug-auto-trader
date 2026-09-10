@@ -208,6 +208,11 @@ def page(saved):
 </div>
 
 <div class="card">
+  <h2>지금까지 얼마를 벌었나</h2>
+  {limits_table(now.get("성적") or {})}
+</div>
+
+<div class="card">
   <h2>지금 들고 있는 것</h2>
   {holdings_table(now)}
 </div>
