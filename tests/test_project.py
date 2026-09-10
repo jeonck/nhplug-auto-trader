@@ -440,14 +440,33 @@ class IntegrationHelpersTests(unittest.TestCase):
 
     def test_board_shows_whether_the_news_was_actually_read(self):
         # 뉴스를 안 보고 지나간 회차가 화면에서 눈에 띄어야 합니다.
-        saved = {"지금": {"보유": []}, "회차": [{"시각": "08-18 01:00", "요약": "그대로 뒀습니다.",
-                 "처리함": [{"종목": "엔비디아(NVDA)", "한 일": "그대로 둠", "뉴스": "관련 제목 없음"},
-                            {"종목": "TSMC(TSM)", "한 일": "그대로 둠", "뉴스": "확인하지 않음"}]}]}
+        # 화면은 무슨 일이 있었던 회차만 펼칩니다. 뉴스 줄도 거기 붙습니다.
+        saved = {"지금": {"보유": []}, "회차": [{"시각": "08-18 01:00", "요약": "한 종목 샀습니다.",
+                 "처리함": [{"종목": "엔비디아(NVDA)", "한 일": "매수 주문 1주", "구분": "매수",
+                            "뉴스": "관련 제목 없음"},
+                            {"종목": "TSMC(TSM)", "한 일": "사지 않음", "구분": "안 함",
+                             "뉴스": "확인하지 않음"}]}]}
         html = board.page(saved)
         self.assertIn('<div class="news">뉴스 · 관련 제목 없음</div>', html)
         # 안 본 것은 빨갛게. class 를 두 번 쓰면 브라우저가 뒤엣것을 버립니다.
         self.assertIn('<div class="news none">뉴스 · 확인하지 않음</div>', html)
         self.assertNotIn('class="news" class=', html)
+
+    def test_board_groups_rounds_by_day(self):
+        # 15분마다 도니 하루 스물여섯 회차가 쌓입니다. 그대로 펼치면 끝없이 늘어져
+        # 정작 무엇을 사고팔았는지가 안 보입니다. 날짜로 묶고 조용한 회차는 셉니다.
+        quiet = [{"시각": f"08-18 0{n}:00", "요약": "그대로", "처리함": []} for n in range(1, 6)]
+        loud = {"시각": "08-19 01:00", "요약": "샀습니다",
+                "처리함": [{"종목": "엔비디아(NVDA)", "한 일": "매수 주문 1주", "구분": "매수"}]}
+        html = board.page({"지금": {"보유": []}, "회차": [loud] + quiet})
+
+        self.assertIn("<b>08-19</b>", html)
+        self.assertIn("매수 1", html)
+        self.assertIn("<b>08-18</b>", html)
+        self.assertIn("5회차 · 사고판 것 없음", html)
+        # 조용한 다섯 회차는 줄줄이 펼치지 않고 한 줄로 셉니다.
+        self.assertIn("나머지 5회차는", html)
+        self.assertNotIn("08-18 03:00", html)
 
     def test_board_does_not_let_a_stock_name_become_html(self):
         # 종목 이름은 NH가 준 글자입니다. 그대로 넣으면 화면이 깨집니다.

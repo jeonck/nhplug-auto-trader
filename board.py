@@ -75,6 +75,13 @@ font-size:.84rem;margin:0 0 12px;line-height:1.55}
 .news.none{color:#c22e2e}
 details{margin-top:4px}
 summary{cursor:pointer;font-size:.78rem;color:#8b948f}
+details.day{margin:0 0 10px;border-bottom:1px solid #f0f3f1;padding-bottom:8px}
+details.day:last-child{border-bottom:0}
+summary.dayline{font-size:.9rem;color:#17211b;padding:6px 0;list-style:none}
+summary.dayline::-webkit-details-marker{display:none}
+summary.dayline::before{content:"▸ ";color:#8b948f}
+details.day[open]>summary.dayline::before{content:"▾ "}
+summary.dayline span{color:#8b948f;font-size:.78rem;font-weight:400}
 details p{font-size:.82rem;color:#66706a;margin:6px 0 0;white-space:pre-wrap}
 .none{color:#8b948f;font-size:.87rem;margin:0}
 a{color:#08733f}
@@ -135,9 +142,57 @@ def limits_table(caps):
 
 
 def rounds_list(rounds):
-    """예약이 돈 회차들. 무엇을 했는지가 먼저, 왜 했는지는 접어 둡니다."""
+    """예약이 돈 회차들. **날짜별로 접어서** 보여 줍니다.
+
+    15분마다 도니 하루에 스물여섯 회차가 쌓입니다. 그대로 펼쳐 두면 며칠치가
+    끝없이 늘어져서, 정작 무엇을 사고팔았는지가 안 보입니다. 날짜별로 묶고
+    사고판 것이 있는 날만 펼쳐 둡니다.
+    """
     if not rounds:
         return '<p class="none">아직 사고판 기록이 없습니다. 장이 열리면 여기에 쌓입니다.</p>'
+
+    days, order = {}, []
+    for one in rounds:
+        day = str(one.get("시각", "")).split(" ")[0] or "날짜 모름"
+        if day not in days:
+            days[day] = []
+            order.append(day)
+        days[day].append(one)
+
+    out = ""
+    for n, day in enumerate(order):
+        same = days[day]
+        traded = [i for one in same for i in (one.get("처리함") or [])
+                  if i.get("구분") in ("매수", "매도")]
+        bought = len([i for i in traded if i["구분"] == "매수"])
+        sold = len([i for i in traded if i["구분"] == "매도"])
+        # 무슨 일이 있었던 날인지 한 줄로. 닫아 놔도 이것만 보고 넘길 수 있게.
+        if traded:
+            what = " · ".join(x for x in (f"매수 {bought}" if bought else "",
+                                          f"매도 {sold}" if sold else "") if x)
+        else:
+            what = "사고판 것 없음"
+        # 오늘(맨 위)과 실제로 매매가 있었던 날만 펼쳐 둡니다.
+        opened = " open" if (n == 0 or traded) else ""
+        out += (
+            f'<details class="day"{opened}><summary class="dayline">'
+            f'<b>{esc(day)}</b> <span>{len(same)}회차 · {esc(what)}</span></summary>'
+        )
+        # 하루 스물여섯 회차 중 대부분은 아무 일도 없습니다. 그것까지 다 펼치면
+        # 날짜로 묶은 뜻이 없습니다. 무슨 일이 있었던 회차만 보이고 나머지는 셉니다.
+        worth = [one for one in same
+                 if any(i.get("구분") in ("매수", "매도", "예약", "안 함")
+                        for i in (one.get("처리함") or []))]
+        quiet = len(same) - len(worth)
+        out += _rounds(worth)
+        if quiet:
+            out += (f'<p class="none">나머지 {quiet}회차는 살펴보기만 하고 '
+                    f'아무것도 하지 않았습니다.</p>')
+        out += "</details>"
+    return out
+
+
+def _rounds(rounds):
     out = ""
     for one in rounds:
         # 어느 계좌에서 한 일인지 회차마다 붙입니다. 실거래는 눈에 띄게.
