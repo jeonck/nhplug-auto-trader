@@ -452,6 +452,13 @@ class IntegrationHelpersTests(unittest.TestCase):
         self.assertIn('<div class="news none">뉴스 · 확인하지 않음</div>', html)
         self.assertNotIn('class="news" class=', html)
 
+    def test_board_keeps_the_same_address(self):
+        # 다시 띄울 때마다 주소가 바뀌면, 주소를 외워 둔 사람에게는 화면이 사라진
+        # 것과 같습니다. 빈 포트를 찾아 떠도는 대신 정해진 포트만 씁니다.
+        source = Path(board.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("free_port", source)
+        self.assertIn("8778", source)
+
     def test_board_groups_rounds_by_day(self):
         # 15분마다 도니 하루 스물여섯 회차가 쌓입니다. 그대로 펼치면 끝없이 늘어져
         # 정작 무엇을 사고팔았는지가 안 보입니다. 날짜로 묶고 조용한 회차는 셉니다.

@@ -392,10 +392,21 @@ def parse_args(argv):
 def main():
     opts = parse_args(sys.argv[1:])
     host = "0.0.0.0" if opts["public"] else "127.0.0.1"
-    port = setup.free_port(host, opts["port"])
+    port = opts["port"]
     # 스레드를 씁니다. 브라우저는 미리 연결만 열어 두고 아무것도 보내지 않는 일이
     # 있는데, 한 줄로 도는 서버는 그 빈 연결을 기다리다 화면 전체가 멈춥니다.
-    server = http.server.ThreadingHTTPServer((host, port), Handler)
+    #
+    # **포트는 밀리지 않습니다.** 예전에는 8778이 잡혀 있으면 아무 포트나 골랐는데,
+    # 그러면 다시 띄울 때마다 주소가 바뀝니다. 주소를 외워 둔 사람에게는 화면이
+    # 사라진 것과 같습니다. 이미 떠 있으면 그 화면을 그대로 쓰면 됩니다.
+    try:
+        server = http.server.ThreadingHTTPServer((host, port), Handler)
+    except OSError:
+        raise SystemExit(
+            f"{port}번 포트를 이미 누가 쓰고 있습니다.\n"
+            f"현황 화면이 이미 떠 있다면 http://127.0.0.1:{port} 를 그대로 여세요.\n"
+            f"다른 포트로 띄우려면 --port 뒤에 숫자를 적어 주세요."
+        ) from None
     server.opened = False
     rule = None
 
