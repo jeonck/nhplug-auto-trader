@@ -3,7 +3,10 @@
 예약이 보내는 글만으로는 한눈에 안 들어옵니다. 같은 내용을 표와 색으로 봅니다.
 
 **읽기만 합니다.** 여기서는 주문도, 설정 변경도, 키 입력도 하지 않습니다.
-그래서 계속 켜 두어도 됩니다. 설정은 setup.py, 주문은 trade.py 몫입니다.
+설정은 setup.py, 주문은 trade.py 몫입니다.
+
+**장이 닫히고 한 시간이 지나면 스스로 닫습니다.** 밤새 다시 그릴 것이 없어서입니다.
+다시 보고 싶으면 "현황"이라고 말하면 그때 다시 띄웁니다.
 
 표준 라이브러리만 씁니다(서버 프레임워크 없음).
 """
@@ -13,16 +16,24 @@ import http.server
 import json
 import secrets
 import sys
+import threading
 import time
 import urllib.parse
 import webbrowser
 
+import broker  # 미국장이 지금 어느 구간인지만 물어봅니다. 주문하지 않습니다
 import setup  # 화면을 어떻게 띄울지(브라우저·에이전트·공개)는 이미 정해 두었습니다
+import strategy
 import trade
 
 REFRESH = 60  # 이 초마다 화면이 스스로 다시 그립니다. NH에 다시 묻지는 않습니다.
 STALE = 600  # 남겨 둔 자료가 이만큼 오래됐으면, 화면을 열 때 알아서 다시 불러옵니다.
 AFTER_ORDER = 45  # 주문을 낸 직후에는 이만큼만 기다립니다. 체결이 곧 잡힙니다.
+
+# 장이 닫힌 뒤에도 밤새 60초마다 다시 그릴 이유가 없습니다. 10분마다 계좌를 다시
+# 불러오기까지 합니다. 마감 뒤 잠깐만 남겨 두고 스스로 닫습니다.
+QUIET_AFTER = 3600  # 장이 닫히고 이만큼 지나면 화면을 닫습니다 (1시간)
+QUIET_GRACE = 1800  # 이미 닫힌 뒤에 띄웠다면 이만큼만 보여 주고 닫습니다 (30분)
 
 HEAD = """<!doctype html>
 <html lang="ko"><head><meta charset="utf-8">
@@ -167,8 +178,12 @@ def rounds_list(rounds):
     return out
 
 
-def page(saved):
-    """남겨 둔 것을 화면 하나로. 파일이 없으면 무엇을 하면 되는지 알려 줍니다."""
+def page(saved, refreshing=True):
+    """남겨 둔 것을 화면 하나로. 파일이 없으면 무엇을 하면 되는지 알려 줍니다.
+
+    refreshing 이 False 면 스스로 다시 그리지 않습니다. 장이 닫힌 뒤에도 밤새
+    60초마다 다시 그리고 10분마다 계좌를 불러오는 것을 막기 위해서입니다.
+    """
     if not saved:
         # 여기서 막히면 대개 "예약이 도는 컴퓨터"와 "이 화면을 띄운 컴퓨터"가
         # 다른 경우입니다. 어느 폴더를 읽고 있는지 밝혀 두면 바로 알아챕니다.
@@ -194,11 +209,17 @@ def page(saved):
     us = saved.get("미국장", "closed")
     chips += f'<span class="{"on" if us != "closed" else ""}">미국장 {esc(WHEN.get(us, us))}</span>'
 
-    return HEAD.format(style=STYLE, refresh=f'<meta http-equiv="refresh" content="{REFRESH}">') + f"""
+    tag = f'<meta http-equiv="refresh" content="{REFRESH}">' if refreshing else ""
+    how = (
+        f'{REFRESH}초마다 저절로 새로 그리고\n{STALE // 60}분 넘으면 계좌를 다시 불러옵니다'
+        if refreshing
+        else "장이 닫혀 새로 그리기를 멈췄습니다"
+    )
+    return HEAD.format(style=STYLE, refresh=tag) + f"""
 <main>
 <h1>자동매매 현황</h1>
-<p class="when">마지막 실행 {esc(saved.get("마지막실행", "-"))} · {REFRESH}초마다 저절로 새로 그리고
-{STALE // 60}분 넘으면 계좌를 다시 불러옵니다 · <a href="/?load=1">지금 다시 불러오기</a></p>
+<p class="when">마지막 실행 {esc(saved.get("마지막실행", "-"))} · {how} ·
+<a href="/?load=1">지금 다시 불러오기</a></p>
 <div class="chips">{chips}</div>
 {f'<p class="alarm">{esc(saved["문제"])}</p>' if saved.get("문제") else ""}
 
@@ -243,6 +264,68 @@ def load_now():
         setup.run_child(["trade.py", "--account"], timeout=120)
     except Exception as exc:
         print(f"계좌를 불러오지 못했습니다: {exc}")
+
+
+def market_open(now=None):
+    """이 전략이 보는 장 중 하나라도 열려 있나.
+
+    전략이 국내를 안 하면 국내장은 보지 않습니다. 미국은 상담에서 고른 시간대
+    (정규장만 / 프리마켓 포함 …)만 봅니다. 그래야 "미국 정규장만 하는데 화면은
+    국내장 시간에 돌고 있는" 일이 생기지 않습니다.
+    """
+    if strategy.SYMBOLS and trade.kr_open(now):
+        return True
+    if strategy.US_SYMBOLS and broker.us_session(now) in trade.us_sessions():
+        return True
+    return False
+
+
+def note_market(server):
+    """장이 열려 있으면 그 시각을 적어 둡니다. 이 자국이 언제 닫을지를 정합니다."""
+    if market_open():
+        server.last_busy = time.time()
+
+
+def quiet_for(server):
+    """장이 닫힌 뒤 지난 시간(초). 아직 장중이면 0.
+
+    None은 "이 화면을 띄운 뒤로 장이 한 번도 안 열렸다"는 뜻입니다. 0으로 읽으면
+    안 됩니다. 마감 직후에 띄운 것인지 한밤중에 띄운 것인지 알 수 없어서입니다.
+    """
+    if market_open():
+        return 0
+    last = getattr(server, "last_busy", None)
+    return None if last is None else time.time() - last
+
+
+def self_refreshing(server):
+    """화면이 스스로 다시 그릴 때인가. 장중과 마감 뒤 한 시간 동안만입니다."""
+    quiet = quiet_for(server)
+    return quiet is not None and quiet < QUIET_AFTER
+
+
+def worn_out(server):
+    """이제 화면을 닫을 때인가."""
+    quiet = quiet_for(server)
+    if quiet is None:
+        # 장이 닫힌 뒤에 띄웠습니다. 지난 회차를 훑어볼 만큼만 두고 닫습니다.
+        return time.time() - server.started >= QUIET_GRACE
+    return quiet >= QUIET_AFTER
+
+
+def watch(server, tick=30):
+    """장이 닫히고 한참 지나면 화면을 스스로 닫습니다.
+
+    다시 보고 싶으면 "현황"이라고 말하면 그때 다시 띄웁니다. 켜 둔 채로 밤을
+    새우는 것보다, 필요할 때 다시 띄우는 편이 조용합니다.
+    """
+    while True:
+        note_market(server)
+        if worn_out(server):
+            print("\n장이 닫힌 지 한참 지나 현황 화면을 닫습니다.")
+            server.shutdown()  # serve_forever 를 도는 스레드가 아니어야 합니다
+            return
+        time.sleep(tick)
 
 
 def wait_before_asking(saved):
@@ -300,10 +383,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             load_now()
             # 주소에 load가 남아 있으면 60초마다 NH에 다시 묻게 됩니다. 되돌려 보냅니다.
             return self._send(303, "불러왔습니다.", location="/")
+        note_market(self.server)
         saved = read_board()
         if load_if_stale(self.server, saved):
             saved = read_board()  # 방금 받아 온 것으로 그립니다
-        self._send(200, page(saved))
+        self._send(200, page(saved, self_refreshing(self.server)))
 
 
 USAGE = """python board.py            지금 상황을 화면으로 봅니다
@@ -337,14 +421,17 @@ def main():
     # 있는데, 한 줄로 도는 서버는 그 빈 연결을 기다리다 화면 전체가 멈춥니다.
     server = http.server.ThreadingHTTPServer((host, port), Handler)
     server.opened = False
+    server.started = time.time()
+    server.last_busy = None
     rule = None
+    threading.Thread(target=watch, args=(server,), daemon=True).start()
 
     if opts["public"]:
         server.token = secrets.token_urlsafe(9)
         only_from, _ = setup.ssh_peer()
         rule = setup.firewall_open(port, only_from)
         url = f"http://{setup.my_address()}:{port}/?t={server.token}"
-        # 설정 화면과 달리 스스로 닫지 않습니다. 보기만 하는 화면이라 켜 둬도 됩니다.
+        # 설정 화면처럼 시한을 두지는 않습니다. 장이 닫히고 한참 지나면 닫습니다.
         print(setup.public_guide(url, port, None, rule, only_from, what="현황 화면"))
     elif setup.has_browser():
         url = f"http://127.0.0.1:{port}"

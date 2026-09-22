@@ -5,6 +5,7 @@ import json
 import os
 import socket
 import tempfile
+import time
 import urllib.error
 import unittest
 from pathlib import Path
@@ -513,6 +514,53 @@ class IntegrationHelpersTests(unittest.TestCase):
         for name in ("board", "setup", "check", "scan", "live"):
             body = (commands / f"{name}.md").read_text(encoding="utf-8")
             self.assertIn("description:", body)
+
+    def test_board_stops_refreshing_after_the_market_closes(self):
+        # 장이 닫힌 뒤에도 밤새 60초마다 다시 그리면, 10분마다 계좌까지 다시 부릅니다.
+        server = mock.Mock(started=time.time(), last_busy=None)
+        with mock.patch.object(board, "market_open", return_value=True):
+            board.note_market(server)
+            self.assertEqual(board.quiet_for(server), 0)
+            self.assertTrue(board.self_refreshing(server))
+            self.assertFalse(board.worn_out(server))
+
+        with mock.patch.object(board, "market_open", return_value=False):
+            # 마감 직후 한 시간은 그대로 둡니다. 체결과 마지막 회차를 보는 시간입니다.
+            server.last_busy = time.time() - 60
+            self.assertTrue(board.self_refreshing(server))
+            self.assertFalse(board.worn_out(server))
+            # 한 시간이 지나면 새로 그리지 않고 스스로 닫습니다.
+            server.last_busy = time.time() - board.QUIET_AFTER - 1
+            self.assertFalse(board.self_refreshing(server))
+            self.assertTrue(board.worn_out(server))
+
+    def test_board_opened_after_hours_shows_itself_then_closes(self):
+        # 장이 닫힌 뒤에 띄운 화면입니다. 지난 회차는 볼 수 있어야 하지만,
+        # 새로 그릴 것이 없으니 새로고침은 붙이지 않습니다.
+        server = mock.Mock(started=time.time(), last_busy=None)
+        with mock.patch.object(board, "market_open", return_value=False):
+            self.assertIsNone(board.quiet_for(server))
+            self.assertFalse(board.self_refreshing(server))
+            self.assertFalse(board.worn_out(server))  # 아직 볼 시간은 있습니다
+            server.started = time.time() - board.QUIET_GRACE - 1
+            self.assertTrue(board.worn_out(server))
+
+    def test_board_watches_only_the_markets_the_strategy_uses(self):
+        # 미국만 하는데 국내장 시간에 화면이 돌고 있으면 안 됩니다.
+        with (
+            mock.patch.object(strategy, "SYMBOLS", []),
+            mock.patch.object(strategy, "US_SYMBOLS", ["NVDA"]),
+            mock.patch.object(trade, "kr_open", return_value=True),
+            mock.patch.object(board.broker, "us_session", return_value="closed"),
+        ):
+            self.assertFalse(board.market_open())
+        with (
+            mock.patch.object(strategy, "SYMBOLS", []),
+            mock.patch.object(strategy, "US_SYMBOLS", ["NVDA"]),
+            mock.patch.object(trade, "kr_open", return_value=False),
+            mock.patch.object(board.broker, "us_session", return_value="regular"),
+        ):
+            self.assertTrue(board.market_open())
 
     def test_limits_are_visible_without_opening_the_strategy_file(self):
         # 파일을 못 여는 사람이 자기 돈이 얼마나 걸려 있는지 알 길이 있어야 합니다.
