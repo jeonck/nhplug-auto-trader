@@ -270,6 +270,7 @@ def order(act, side, code, qty, limit_price):
 
 US_NATION = "200"  # 미국
 NEW_YORK = ZoneInfo("America/New_York")
+SEOUL = ZoneInfo("Asia/Seoul")
 
 
 def us_session(now=None):
@@ -377,8 +378,12 @@ def us_name(ticker):
     return us_quote(ticker)["name"]
 
 
-def us_closes(ticker, days=20):
-    """최근 일봉 종가를 오래된 것부터."""
+def us_bars(ticker, days=20):
+    """최근 일봉을 오래된 것부터. [{"date","open","high","low","close"}, …]
+
+    종가만으로는 그날 익절선이나 손절선에 닿았는지 알 수 없습니다. 고가·저가가 있어야
+    되돌아보기(review.py)가 "그날 팔렸을 것"을 판정할 수 있습니다.
+    """
     today = datetime.datetime.now(NEW_YORK).strftime("%Y%m%d")
     out = _call(
         "/gbstock/quote/v1/period",
@@ -394,14 +399,26 @@ def us_closes(ticker, days=20):
         },
         live_read=True,
     )
-    rows = out.get("Output_1") or []
-    values = [
-        (str(r.get("trade_date") or r.get("bsop_date") or ""), float(r.get("close_prc") or 0))
-        for r in rows
-    ]
-    values = [(d, p) for d, p in values if d and p > 0]
-    values.sort()
-    return [round(p, 2) for _, p in values]
+    bars = []
+    for row in out.get("Output_1") or []:
+        day = str(row.get("trade_date") or row.get("bsop_date") or "")
+        close = float(row.get("close_prc") or 0)
+        if not day or close <= 0:
+            continue
+        bars.append({
+            "date": day,
+            "open": round(float(row.get("open_prc") or close), 2),
+            "high": round(float(row.get("high") or close), 2),
+            "low": round(float(row.get("low") or close), 2),
+            "close": round(close, 2),
+        })
+    bars.sort(key=lambda b: b["date"])
+    return bars
+
+
+def us_closes(ticker, days=20):
+    """최근 일봉 종가를 오래된 것부터."""
+    return [bar["close"] for bar in us_bars(ticker, days)]
 
 
 def us_holdings(act):
@@ -456,6 +473,178 @@ def us_buyable(act, ticker, price, order_type):
 
 def us_sellable(act, ticker, price, order_type):
     return int(float(_us_orderable(act, ticker, price, order_type, "sell").get("sll_pbl_qty") or 0))
+
+
+def us_open_sells(act):
+    """아직 안 채워진 미국 매도 주문. {티커: [{주문번호, 남은수량, 단가}, …]}
+
+    익절을 미리 걸어 두면 그 수량은 묶입니다. 손절이 나야 할 때 걸린 주문을 먼저
+    취소하지 않으면 "팔 수 있는 수량 0주"가 되어 손절이 조용히 실패합니다.
+
+    주문일자는 NH가 어느 날짜로 적는지(한국 날짜인지 뉴욕 날짜인지) 확실치 않은데,
+    미국 정규장은 한국 날짜로 이틀에 걸칩니다. 그래서 오늘과 어제를 둘 다 봅니다.
+    """
+    result = {}
+    for day in _us_days():
+        try:
+            rows = _call(
+                "/gbstock/inquiry/v1/unexecuted",
+                {
+                    "orr_dt": day,
+                    "act_no": act,
+                    "oss_sby_dit_cd": "1",  # 매도만
+                    "sot_dit": "1",
+                    "ost_cns_dit": "2",  # 미체결만
+                },
+            ).get("Output_0") or []
+        except Exception as exc:
+            # 그날 주문이 하나도 없으면 NH가 "데이터가 존재하지 않습니다"로 답합니다.
+            # 그것은 오류가 아니라 "없음"입니다. 오류로 읽으면 익절 예약이 영영
+            # 걸리지 않습니다. 나머지 오류는 그대로 올립니다.
+            if getattr(exc, "code", "") != "11512":
+                raise
+            continue
+        for row in rows:
+            # 이 조회의 iem_cd 에는 티커가 아니라 ISIN(US67066G1040)이 들어옵니다.
+            # 티커는 tck_iem_cd 입니다. 잘못 읽으면 "이미 걸어 뒀는지"가 영영 안 맞아
+            # 회차마다 같은 매도 주문이 새로 쌓이고, 수량이 묶여 손절이 막힙니다.
+            ticker = str(row.get("tck_iem_cd") or row.get("iem_cd") or "").strip()
+            left = int(float(row.get("ny_cns_orr_qty") or 0))
+            order_no = str(row.get("orr_no") or "").strip()
+            if not ticker or not order_no or left <= 0:
+                continue
+            # 같은 주문이 여러 날짜 조회에 겹쳐 나올 수 있습니다. 한 번만 셉니다.
+            if any(o["orr_no"] == order_no for o in result.get(ticker, [])):
+                continue
+            result.setdefault(ticker, []).append({
+                "orr_no": order_no,
+                "qty": left,
+                "price": round(float(row.get("fc_orr_uit_pr") or 0), 2),
+            })
+    return result
+
+
+LOOKBACK_DAYS = 3
+
+
+def _us_days():
+    """걸어 둔 주문을 찾을 날짜들. 미국 정규장은 한국 날짜로 이틀에 걸칩니다.
+
+    **이 조회로 "지금 살아 있는 주문"을 판정하면 안 됩니다.** 지난 날짜로 물으면
+    그날 기준의 기록이 그대로 나옵니다. 이미 체결·소멸한 주문도 미체결로 보입니다.
+    취소를 걸어 보면 "원주문번호가 존재하지 않습니다"로 돌아옵니다.
+    지금 무엇이 묶여 있는지는 us_sellable 로 봐야 정확합니다.
+    """
+    seoul = datetime.datetime.now(SEOUL)
+    days = {(seoul - datetime.timedelta(days=n)).strftime("%Y%m%d")
+            for n in range(LOOKBACK_DAYS)}
+    days.add(datetime.datetime.now(NEW_YORK).strftime("%Y%m%d"))
+    return sorted(days)
+
+
+def us_reserved_stops(act):
+    """살아 있는 STOP 손절 예약. {티커: [{주문일자, 접수번호, 수량, 기준가}, …]}
+
+    손절은 지정가로 미리 걸 수 없습니다(지금 값 아래에 걸면 즉시 팔립니다).
+    NH는 그것을 **예약주문**으로 받습니다. 값이 닿으면 그때 시장가로 나갑니다.
+    """
+    result = {}
+    for day in _us_days():
+        try:
+            rows = _call(
+                "/gbstock/inquiry/v1/reservedInquiry",
+                {
+                    "fc_mkt_dit_cd": US_NATION,
+                    "bkg_orr_dt": day,
+                    "act_no": act,
+                    "sby_dit_cd": "1",  # 매도만
+                    "bkg_orr_can_yn": "1",  # 접수된 것만 (취소·완료 제외)
+                    "oss_orr_knd_cd": "0",
+                    "bkg_orr_tp_cd": "0",
+                    "wtm_cur_knd_cd": "0",
+                },
+            ).get("Output_0") or []
+        except Exception as exc:
+            if getattr(exc, "code", "") != "11512":  # 그날 예약이 없음
+                raise
+            continue
+        for row in rows:
+            # 미체결 조회와 마찬가지로 티커는 tck_iem_cd 쪽입니다.
+            ticker = str(row.get("tck_iem_cd") or row.get("iem_cd") or "").strip()
+            if not ticker or str(row.get("orr_pdt_dit_cd") or "").strip() != "03":
+                continue
+            result.setdefault(ticker, []).append({
+                "day": day,
+                "no": str(row.get("bkg_rtn_orr_no") or "").strip(),
+                "qty": int(float(row.get("orr_qty") or 0)),
+                "stop": round(float(row.get("fc_stop_orr_bse_pr") or 0), 2),
+            })
+    return result
+
+
+def us_reserve_stop(act, ticker, qty, stop_price):
+    """STOP(시장가) 손절을 예약합니다. 오늘 하루짜리로 겁니다.
+
+    며칠짜리로 걸면 나중에 어느 날짜로 등록했는지 알아야 찾을 수 있습니다. 하루짜리면
+    오늘만 보면 되고, 회차가 15분마다 도니 매일 첫 회차가 알아서 다시 겁니다.
+    """
+    day = datetime.datetime.now(SEOUL).strftime("%Y%m%d")
+    return (
+        _call(
+            "/gbstock/order/v1/reservedSubmit",
+            {
+                "act_no": act,
+                "fc_sec_trd_nat_cd": US_NATION,
+                "iem_cd": ticker,
+                "oss_sby_dit_cd": "1",  # 매도
+                "orr_qty": int(qty),
+                "nmn_pr_tp_cd": "15",  # STOP(시장가)
+                "fc_stop_orr_bse_pr": round(float(stop_price), 2),
+                "orr_pdt_dit_cd": "03",  # 미국Stop예약주문
+                "bkg_orr_tp_cd": "1",  # 일반예약
+                "bkg_orr_sta_dt": day,
+                "bkg_orr_end_dt": day,
+            },
+        ).get("Output_0")
+        or {}
+    ).get("bkg_rtn_orr_no")
+
+
+def us_reserved_cancel(act, ticker, day, reserved_no):
+    """걸어 둔 STOP 예약을 취소합니다."""
+    return _call(
+        "/gbstock/order/v1/reservedCancel",
+        {
+            "act_no": act,
+            "fc_mkt_dit_cd": US_NATION,
+            "bkg_orr_dt": day,
+            # 취소 계열은 주문번호를 숫자로 받습니다(us_cancel 참고).
+            "bkg_rtn_orr_no": int(str(reserved_no).strip()),
+            "iem_cd": ticker,
+            "orr_pdt_dit_cd": "03",
+        },
+    )
+
+
+def us_cancel(act, ticker, order_no):
+    """걸어 둔 미국 주문을 통째로 취소합니다.
+
+    주문번호는 **숫자로** 보내야 합니다. 조회는 "783"처럼 문자로 주는데, 취소에
+    그대로 넣으면 "org_orr_no 길이나 data type을 확인하세요"로 거절합니다.
+    """
+    return (
+        _call(
+            "/gbstock/order/v1/cancel",
+            {
+                "act_no": act,
+                "org_orr_no": int(str(order_no).strip()),
+                "fc_sec_trd_nat_cd": US_NATION,
+                "iem_cd": ticker,
+                "all_pat_dit_cd": "1",  # 전체 취소
+            },
+        ).get("Output_0")
+        or {}
+    ).get("orr_no")
 
 
 def us_order(act, side, ticker, qty, price, order_type):

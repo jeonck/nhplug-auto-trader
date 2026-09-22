@@ -36,7 +36,9 @@ TRIED = Path(__file__).with_name(".cache") / "tried.json"
 # 예약이 보내는 글만으로는 지금 상황이 한눈에 안 들어옵니다. 회차마다 여기에
 # 남겨 두고, board.py 가 같은 내용을 표와 색으로 그려 줍니다.
 BOARD = Path(__file__).with_name(".cache") / "board.json"
-KEEP_ROUNDS = 50  # 미국장은 하룻밤에 일곱 번 돕니다. 며칠은 되돌아볼 수 있게.
+# 15분 간격이면 미국장 하룻밤에 스물여섯 번 돕니다. 50이면 이틀도 안 남습니다.
+# 되돌아보기(review.py)가 하루치를 온전히 읽으려면 며칠은 있어야 합니다.
+KEEP_ROUNDS = 200
 
 # 뉴스를 안 보고 사려 할 때 남기는 말. 왜 막혔는지와 무엇을 고치면 되는지를
 # 한 자리에 적어 둡니다. 화면에도 이 문장이 그대로 보입니다.
@@ -131,6 +133,33 @@ def _extra_facts(m):
         return []
 
 
+_INDEX = None
+
+
+def index_closes():
+    """전략이 시장 상태를 볼 기준 종목의 종가. **이 종목은 매매하지 않습니다.**
+
+    레버리지 ETF는 자기 숫자로 시장을 읽으면 틀립니다. QQQM이 200일선 위인 날에도
+    TQQQ는 자기 200일선 아래인 일이 실제로 있었습니다(2026-07-29). 그날 진입을
+    통째로 놓칩니다. 그래서 기준이 되는 종목을 따로 봅니다.
+
+    회차마다 한 번만 받습니다. 전략이 MARKET_INDEX 를 안 정했으면 받지 않습니다.
+    """
+    global _INDEX
+    if _INDEX is not None:
+        return _INDEX
+    name = getattr(strategy, "MARKET_INDEX", "")
+    if not name:
+        _INDEX = []
+        return _INDEX
+    try:
+        _INDEX = broker.us_closes(name, CANDLE_DAYS)
+    except Exception as exc:  # 못 받아도 나머지는 굴러가야 합니다.
+        log(f"  시장 기준({name}) 시세를 받지 못했습니다: {exc}")
+        _INDEX = []
+    return _INDEX
+
+
 def context(market, code, held, cash):
     """strategy.decide()에 넘길 종목 상태. 국내·미국이 같은 모양으로 나옵니다.
 
@@ -167,6 +196,8 @@ def context(market, code, held, cash):
         "cash": cash,
         # 사고팔지는 클로드 코드가 정합니다. --do 가 넘겨 준 판단이 여기 들어옵니다.
         "ai": None,
+        # 시장 기준 종목(MARKET_INDEX)의 종가. 레버리지 ETF가 지수를 보고 판단할 때 씁니다.
+        "index_closes": index_closes() if market == "us" else [],
     }
     return m
 
@@ -217,6 +248,9 @@ def scan(act, dry=False):
             skipped.append(f"{m['name']}({code}) {reason}")
 
     held, cash = refreshed(act, held, cash, done)
+    # 사고판 뒤에 겁니다. 익절이 이미 걸려 있는 종목은 건너뜁니다.
+    done += rest_take_profit(act, held, dry)
+    done += rest_stop_loss(act, held, dry)
     return {
         "요약": summary(done, skipped, ask),
         "장": "열림",
@@ -252,6 +286,8 @@ def portfolio(held, cash):
         "보유": rows,
         "종목수": f"{len(held)} / {strategy.MAX_HOLDINGS}",
         "주문가능현금": f"{cash:,}원",
+        # 들고 있는 것만 보면 판 것이 안 보입니다. 합쳐서 얼마인지가 진짜 성적입니다.
+        "성적": performance(held),
     }
     # 현금이 한 종목 예산보다 적으면 한 주도 못 삽니다. 그런데 화면에는 "주문이
     # 나간 것이 없습니다"라고만 나와서, 무엇이 잘못됐는지 알 수가 없었습니다.
@@ -265,6 +301,98 @@ def portfolio(held, cash):
     return out
 
 
+LEDGER = Path(__file__).with_name(".cache") / "trades.json"
+FEE_RATE = 0.0009  # NH 해외주식 API 수수료 0.09% (한쪽마다)
+
+
+def record(m, side, qty, price):
+    """나간 주문을 남깁니다. **판 것까지 합친 성적을 내려면 이 기록이 있어야 합니다.**
+
+    모의투자 서버는 기간손익도 일별거래도 빈 값으로 줍니다. 실제로 얼마를 벌었는지
+    알 방법이 우리 기록밖에 없습니다.
+    """
+    try:
+        rows = json.loads(LEDGER.read_text(encoding="utf-8")) if LEDGER.exists() else []
+    except Exception:
+        rows = []
+    rows.append({
+        "시각": datetime.datetime.now(SEOUL).strftime("%Y-%m-%d %H:%M"),
+        "종목": m["code"], "이름": m.get("name") or m["code"],
+        "구분": side, "수량": int(qty), "단가": round(float(price), 4),
+        "통화": m.get("currency", "USD"),
+    })
+    try:
+        LEDGER.parent.mkdir(parents=True, exist_ok=True)
+        LEDGER.write_text(json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception as exc:  # 기록이 실패해도 매매는 계속되어야 합니다.
+        log(f"    거래 기록을 남기지 못했습니다: {exc}")
+
+
+def performance(held):
+    """지금까지의 성적. 판 것(실현)과 들고 있는 것(평가)을 나눠서 냅니다.
+
+    수수료는 양쪽 0.09%를 빼고 셉니다. 세금은 넣지 않았습니다.
+    """
+    try:
+        rows = json.loads(LEDGER.read_text(encoding="utf-8")) if LEDGER.exists() else []
+    except Exception:
+        rows = []
+
+    book, realized, wins, losses = {}, 0.0, 0, 0
+    for row in rows:
+        code, qty, price = row["종목"], row["수량"], row["단가"]
+        have = book.setdefault(code, {"qty": 0, "cost": 0.0})
+        if row["구분"] == "매수":
+            have["qty"] += qty
+            have["cost"] += qty * price * (1 + FEE_RATE)
+        elif have["qty"] > 0:
+            sold = min(qty, have["qty"])
+            avg = have["cost"] / have["qty"]
+            gain = sold * price * (1 - FEE_RATE) - sold * avg
+            realized += gain
+            wins, losses = (wins + 1, losses) if gain > 0 else (wins, losses + 1)
+            have["cost"] -= sold * avg
+            have["qty"] -= sold
+
+    # 들고 있는 것의 평가손익은 NH 잔고를 그대로 씁니다(환율·수수료가 이미 반영됨).
+    open_gain = sum(
+        (item.get("price", 0) - item.get("avg", 0)) * item.get("qty", 0)
+        for item in held.values() if item.get("avg")
+    )
+    # 달러만 보면 얼마인지 잘 안 잡힙니다. 잔고에 원화 평가액이 같이 오므로
+    # 거기서 환율을 얻어 원으로도 적어 줍니다. 잔고가 없으면 생략합니다.
+    rate = next(
+        (item["krw"] / (item["price"] * item["qty"])
+         for item in held.values()
+         if item.get("krw") and item.get("price") and item.get("qty")),
+        None,
+    )
+
+    def both(value):
+        return f"${value:+,.2f}" + (f" ({value * rate:+,.0f}원)" if rate else "")
+
+    done = wins + losses
+    out = {
+        "판 것": (f"{done}번 · {wins}승 {losses}패 · {both(realized)}" if done
+                 else "아직 판 것이 없습니다"),
+        "들고 있는 것": both(open_gain) if held else "없음",
+        "합계": both(realized + open_gain),
+    }
+    if done:
+        out["이긴 비율"] = f"{wins / done * 100:.0f}%"
+    return out
+
+
+def us_budget(ticker):
+    """이 미국 종목 한 자리에 넣을 금액(달러).
+
+    종목마다 다르게 두고 싶을 때만 strategy.US_BUY_AMOUNTS 에 적습니다. 적지 않은
+    종목은 US_BUY_AMOUNT 를 그대로 씁니다. SOXL 처럼 3배로 움직이는 상품에 다른
+    종목과 같은 돈을 넣으면 위험만 3배가 되기 때문에 필요한 구멍입니다.
+    """
+    return getattr(strategy, "US_BUY_AMOUNTS", {}).get(ticker, getattr(strategy, "US_BUY_AMOUNT", 300))
+
+
 def limits():
     """지금 걸려 있는 한도. 실제 돈으로 넘어가기 전에 이 숫자부터 봐야 합니다.
 
@@ -274,15 +402,30 @@ def limits():
     per_kr = strategy.BUY_AMOUNT
     per_us = getattr(strategy, "US_BUY_AMOUNT", 0)
     most = strategy.MAX_HOLDINGS
+    # 종목마다 금액이 다르면 "미국 $2,000"만 보여 주는 것은 거짓말이 됩니다.
+    # 다른 것만 뒤에 붙이고, 최대 금액은 비싼 자리부터 채운 값으로 계산합니다.
+    odd_us = {t: us_budget(t) for t in getattr(strategy, "US_SYMBOLS", []) if us_budget(t) != per_us}
+    us_text = f"미국 ${per_us:,}" + (
+        " (" + " · ".join(f"{t} ${v:,}" for t, v in odd_us.items()) + ")" if odd_us else ""
+    )
+    # 딥매수 자리는 최대 종목 수에 안 세므로 **따로 더합니다.** 안 그러면 화면이
+    # 실제보다 적은 금액을 말합니다. 파일을 못 여는 사람에게는 그게 전부입니다.
+    dip = getattr(strategy, "DIP_BUY", {})
+    tickers = getattr(strategy, "US_SYMBOLS", [])
+    others = sorted((us_budget(t) for t in tickers if t not in dip), reverse=True)[:most]
+    worst_us = sum(others) + sum(us_budget(t) for t in tickers if t in dip)
+    stops = getattr(strategy, "STOP_LOSS_PCTS", {})
+    stop_text = f"{getattr(strategy, 'STOP_LOSS_PCT', 0):+.1f}%" + (
+        " (" + " · ".join(f"{t} {v:+.1f}%" for t, v in stops.items()) + ")" if stops else ""
+    )
     return {
-        "한 종목에 넣는 돈": f"국내 {per_kr:,}원 · 미국 ${per_us:,}",
-        "최대 종목 수": f"{most}종목",
-        # 다 국내로 채울 때와 다 미국으로 채울 때가 다릅니다. 둘 다 보여 줍니다.
-        "최대로 들어갈 수 있는 돈": f"국내만이면 {per_kr * most:,}원 · 미국만이면 ${per_us * most:,}",
-        "손절 · 익절": (
-            f"{getattr(strategy, 'STOP_LOSS_PCT', 0):+.1f}% · "
-            f"{getattr(strategy, 'TAKE_PROFIT_PCT', 0):+.1f}%"
+        "한 종목에 넣는 돈": f"국내 {per_kr:,}원 · {us_text}",
+        "최대 종목 수": f"{most}종목" + (
+            f" + 딥매수 {', '.join(sorted(dip))} (따로 셉니다)" if dip else ""
         ),
+        # 다 국내로 채울 때와 다 미국으로 채울 때가 다릅니다. 둘 다 보여 줍니다.
+        "최대로 들어갈 수 있는 돈": f"국내만이면 {per_kr * most:,}원 · 미국만이면 ${worst_us:,}",
+        "손절 · 익절": f"{stop_text} · {getattr(strategy, 'TAKE_PROFIT_PCT', 0):+.1f}%",
         "미국을 보는 시간대": " · ".join(
             {"pre": "프리마켓", "regular": "정규장", "after": "애프터마켓"}[s] for s in us_sessions()
         ),
@@ -480,6 +623,142 @@ def noted(where, did, reason="", kind="그대로"):
     return out
 
 
+def rest_take_profit(act, held, dry=False):
+    """산 것에 익절 매도를 **미리 걸어 둡니다.** 회차마다 없는 것만 새로 겁니다.
+
+    회차 사이에 값이 목표를 찍고 되돌아오면 다음 회차에서는 이미 늦습니다. 미리
+    걸어 둔 주문은 증권사에 얹혀 있다가 값이 닿는 순간 저절로 체결되므로, 우리가
+    깨어 있지 않아도 됩니다. 손절은 이렇게 못 합니다. 지금 값보다 아래에 파는
+    주문을 걸면 그 자리에서 바로 팔려 버리기 때문입니다.
+    """
+    base = getattr(strategy, "TAKE_PROFIT_PCT", 0)
+    per_symbol = getattr(strategy, "TAKE_PROFIT_PCTS", {})
+    # 연장 세션에 건 지정가는 그 세션에서만 살아 있습니다. 정규장에서만 겁니다.
+    if base <= 0 or broker.us_session() != "regular":
+        return []
+
+    out = []
+    for ticker in getattr(strategy, "US_SYMBOLS", []):
+        row = held.get(ticker)
+        if not row:
+            continue
+        # 익절선이 None인 종목은 %로 팔지 않습니다(전고점 회복까지 기다리는 자리).
+        pct = per_symbol.get(ticker, base)
+        if not pct or pct <= 0:
+            continue
+        avg, qty = float(row.get("avg") or 0), int(row.get("qty") or 0)
+        if avg <= 0 or qty < 1:
+            continue
+
+        target = round(avg * (1 + pct / 100), 2)
+        where = label(row.get("name"), ticker)
+        reason = f"평균 {avg:,.2f}달러의 +{pct}%인 {target:,.2f}달러에 미리 걸어 둡니다"
+        log(f"  {where} 익절 예약 {target:,.2f}달러 · {qty}주")
+        if dry:
+            out.append(noted(where, "익절 매도를 걸었을 것 (확인용이라 주문하지 않음)", reason))
+            continue
+
+        m = {
+            "code": ticker, "name": row.get("name") or ticker, "market": "us",
+            "currency": "USD", "price": target, "qty": qty,
+            "pnl_pct": row.get("pnl_pct", 0.0),
+        }
+        try:
+            # **"이미 걸어 뒀는가"는 팔 수 있는 수량으로 판정합니다.** 주문 조회로
+            # 판정하면 지난 날짜의 죽은 기록에 속아 같은 익절을 또 겁니다(9/9 NVDA).
+            # 수량이 두 배로 묶이면 손절이 "0주"로 조용히 실패합니다.
+            # 가진 수량이 전부 자유로울 때만 새로 겁니다.
+            sellable = broker.us_sellable(act, ticker, target, "00")
+            if sellable < qty:
+                out.append(noted(where, "이미 걸려 있거나 당일 매수분이라 걸지 않습니다", reason))
+                continue
+            denied = approved(act, m, "sell", qty, target, reason)
+            if denied:
+                out.append(noted(where, denied, reason))
+                continue
+            order_no = broker.us_order(act, "sell", ticker, qty, target, "00")
+        except Exception as exc:
+            log(f"    익절 예약을 걸지 못했습니다: {exc}")
+            out.append(noted(where, f"익절 예약 실패 · {exc}", reason))
+            continue
+        out.append(noted(where, f"익절 매도 예약 {qty}주 @ ${target:,.2f} · 주문번호 {order_no}", reason, "예약"))
+    return out
+
+
+def rest_stop_loss(act, held, dry=False):
+    """손절을 **STOP 예약주문으로 미리 걸어 둡니다.** 값이 닿으면 시장가로 나갑니다.
+
+    지정가로는 손절을 미리 못 겁니다. 지금 값 아래에 파는 주문을 걸면 그 자리에서
+    바로 팔리기 때문입니다. NH는 이것을 예약주문으로 받습니다.
+
+    익절(지정가)과 손절(STOP 예약)이 동시에 걸려 있어도, 한쪽이 체결되면 다른 쪽을
+    지워 주는 기능이 NH에 없습니다. 그래서 여기서 **안 들고 있는 종목의 예약을 먼저
+    치웁니다.** 15분마다 도니 유령 주문은 길어야 그동안만 남습니다.
+
+    15분마다 확인하는 손절은 그대로 둡니다. 예약이 거부됐을 때의 마지막 그물입니다.
+    """
+    if broker.us_session() != "regular":
+        return []
+    if broker.MOCK:
+        # 모의투자 서버는 STOP 예약을 받지 않습니다("14040 모의투자 지정가만 가능합니다").
+        # 실거래에서는 됩니다. 그동안 손절은 회차마다 확인하는 쪽이 대신합니다.
+        return []
+    try:
+        resting = broker.us_reserved_stops(act)
+    except Exception as exc:
+        log(f"  걸어 둔 손절 예약을 확인하지 못해 이번 회차는 건너뜁니다: {exc}")
+        return []
+
+    out = []
+    # 판 뒤에 남은 예약부터 치웁니다. 남겨 두면 없는 주식을 팔려고 듭니다.
+    for ticker, orders in resting.items():
+        if held.get(ticker) or dry:
+            continue
+        for order in orders:
+            try:
+                broker.us_reserved_cancel(act, ticker, order["day"], order["no"])
+                log(f"  {ticker} 안 들고 있어 손절 예약 {order['no']}을 취소했습니다")
+                out.append(noted(ticker, f"손절 예약 취소 {order['no']} · 이제 안 들고 있습니다"))
+            except Exception as exc:
+                log(f"  {ticker} 손절 예약을 취소하지 못했습니다: {exc}")
+
+    stops = getattr(strategy, "STOP_LOSS_PCTS", {})
+    for ticker in getattr(strategy, "US_SYMBOLS", []):
+        row = held.get(ticker)
+        if not row or resting.get(ticker):
+            continue
+        avg, qty = float(row.get("avg") or 0), int(row.get("qty") or 0)
+        pct = stops.get(ticker, getattr(strategy, "STOP_LOSS_PCT", 0))
+        if avg <= 0 or qty < 1 or pct >= 0:
+            continue
+
+        trigger = round(avg * (1 + pct / 100), 2)
+        where = label(row.get("name"), ticker)
+        reason = f"평균 {avg:,.2f}달러의 {pct}%인 {trigger:,.2f}달러에 닿으면 팝니다"
+        log(f"  {where} 손절 예약 {trigger:,.2f}달러 · {qty}주")
+        if dry:
+            out.append(noted(where, "손절을 걸었을 것 (확인용이라 주문하지 않음)", reason))
+            continue
+
+        m = {
+            "code": ticker, "name": row.get("name") or ticker, "market": "us",
+            "currency": "USD", "price": trigger, "qty": qty,
+            "pnl_pct": row.get("pnl_pct", 0.0),
+        }
+        try:
+            denied = approved(act, m, "sell", qty, trigger, reason)
+            if denied:
+                out.append(noted(where, denied, reason))
+                continue
+            no = broker.us_reserve_stop(act, ticker, qty, trigger)
+        except Exception as exc:
+            log(f"    손절 예약을 걸지 못했습니다: {exc}")
+            out.append(noted(where, f"손절 예약 실패 · {exc}", reason))
+            continue
+        out.append(noted(where, f"손절 예약 {qty}주 @ ${trigger:,.2f} · 접수번호 {no}", reason, "예약"))
+    return out
+
+
 def execute(act, m, held, action, reason, dry=False):
     """한 종목을 실제로 주문합니다. 무슨 일이 있었는지 항목으로 돌려줍니다."""
     where = label(m["name"], m["code"])
@@ -536,13 +815,19 @@ def buy(act, m, held, reason=""):
     if m["held"]:
         log("    이미 보유 중이라 사지 않습니다")
         return "이미 보유 중이라 사지 않음"
-    if len(held) >= strategy.MAX_HOLDINGS:
-        log(f"    최대 {strategy.MAX_HOLDINGS}종목까지만 들고 갑니다")
-        return f"최대 {strategy.MAX_HOLDINGS}종목까지라 사지 않음"
+    # 딥매수 자리는 최대 종목 수에 넣지 않습니다. 신호가 1년에 며칠뿐이라, 그날
+    # 다른 종목이 자리를 붙들고 있으면 그 해의 기회가 통째로 사라집니다. 실제로
+    # 지난 1년의 유일한 딥(2026-07-29)이 자리 부족으로 그냥 지나갔습니다.
+    dip = getattr(strategy, "DIP_BUY", {})
+    if m["code"] not in dip:
+        others = [code for code in held if code not in dip]
+        if len(others) >= strategy.MAX_HOLDINGS:
+            log(f"    최대 {strategy.MAX_HOLDINGS}종목까지만 들고 갑니다")
+            return f"최대 {strategy.MAX_HOLDINGS}종목까지라 사지 않음"
 
     price = m["price"]
     if m["market"] == "us":
-        budget = getattr(strategy, "US_BUY_AMOUNT", 300)
+        budget = us_budget(m["code"])
         order_type = broker.us_order_type(broker.us_session())
         qty = min(int(budget // price), broker.us_buyable(act, m["code"], price, order_type))
     else:
@@ -562,6 +847,7 @@ def buy(act, m, held, reason=""):
     else:
         order_no = broker.order(act, "buy", m["code"], qty, price)
     log(f"    매수 주문 {qty}주 @ {money(price, m['currency'])} · 주문번호 {order_no}")
+    record(m, "매수", qty, price)
     telegram.notify(f"매수 전송: {m['name']} {qty}주 @ {money(price, m['currency'])}")
     held[m["code"]] = {"name": m["name"], "qty": qty, "avg": price, "price": price, "pnl_pct": 0.0}
     return f"매수 주문 {qty}주 @ {money(price, m['currency'])} · 주문번호 {order_no}"
@@ -570,6 +856,19 @@ def buy(act, m, held, reason=""):
 def sell(act, m, reason=""):
     price = m["price"]
     if m["market"] == "us":
+        # 익절을 미리 걸어 두었으면 그 수량이 묶여 있습니다. 먼저 풀지 않으면
+        # 손절이 "팔 수 있는 수량 0주"로 조용히 실패합니다.
+        # 조회가 실패했다고 손절까지 막으면 안 됩니다. 파는 쪽은 늘 진행합니다.
+        try:
+            for order in broker.us_open_sells(act).get(m["code"], []):
+                broker.us_cancel(act, m["code"], order["orr_no"])
+                log(f"    걸어 둔 매도 주문 {order['orr_no']}을 취소했습니다")
+            # STOP 손절 예약도 같이 풉니다. 남기면 없는 주식을 팔려고 듭니다.
+            for order in broker.us_reserved_stops(act).get(m["code"], []):
+                broker.us_reserved_cancel(act, m["code"], order["day"], order["no"])
+                log(f"    걸어 둔 손절 예약 {order['no']}을 취소했습니다")
+        except Exception as exc:
+            log(f"    걸어 둔 주문을 확인하지 못했습니다: {exc}")
         order_type = broker.us_order_type(broker.us_session())
         qty = min(m["qty"], broker.us_sellable(act, m["code"], price, order_type))
     else:
@@ -588,6 +887,7 @@ def sell(act, m, reason=""):
     else:
         order_no = broker.order(act, "sell", m["code"], qty, price)
     log(f"    매도 주문 {qty}주 @ {money(price, m['currency'])} · 주문번호 {order_no}")
+    record(m, "매도", qty, price)
     telegram.notify(f"매도 전송: {m['name']} {qty}주 @ {money(price, m['currency'])}")
     return f"매도 주문 {qty}주 @ {money(price, m['currency'])} · 주문번호 {order_no}"
 
@@ -748,6 +1048,9 @@ def do(act, calls):
 
     tell_what_did_not_go(done)
     held, cash = refreshed(act, held, cash, done)
+    # 방금 산 것에도 익절을 걸어 둡니다. 당일 매수분이라 못 걸면 다음 회차가 겁니다.
+    done += rest_take_profit(act, held)
+    done += rest_stop_loss(act, held)
     return {
         "요약": traded(done, held),
         "장": "열림",

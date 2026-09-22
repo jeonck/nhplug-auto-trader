@@ -86,6 +86,13 @@ font-size:.84rem;margin:0 0 12px;line-height:1.55}
 .news.none{color:#c22e2e}
 details{margin-top:4px}
 summary{cursor:pointer;font-size:.78rem;color:#8b948f}
+details.day{margin:0 0 10px;border-bottom:1px solid #f0f3f1;padding-bottom:8px}
+details.day:last-child{border-bottom:0}
+summary.dayline{font-size:.9rem;color:#17211b;padding:6px 0;list-style:none}
+summary.dayline::-webkit-details-marker{display:none}
+summary.dayline::before{content:"▸ ";color:#8b948f}
+details.day[open]>summary.dayline::before{content:"▾ "}
+summary.dayline span{color:#8b948f;font-size:.78rem;font-weight:400}
 details p{font-size:.82rem;color:#66706a;margin:6px 0 0;white-space:pre-wrap}
 .none{color:#8b948f;font-size:.87rem;margin:0}
 a{color:#08733f}
@@ -146,9 +153,57 @@ def limits_table(caps):
 
 
 def rounds_list(rounds):
-    """예약이 돈 회차들. 무엇을 했는지가 먼저, 왜 했는지는 접어 둡니다."""
+    """예약이 돈 회차들. **날짜별로 접어서** 보여 줍니다.
+
+    15분마다 도니 하루에 스물여섯 회차가 쌓입니다. 그대로 펼쳐 두면 며칠치가
+    끝없이 늘어져서, 정작 무엇을 사고팔았는지가 안 보입니다. 날짜별로 묶고
+    사고판 것이 있는 날만 펼쳐 둡니다.
+    """
     if not rounds:
         return '<p class="none">아직 사고판 기록이 없습니다. 장이 열리면 여기에 쌓입니다.</p>'
+
+    days, order = {}, []
+    for one in rounds:
+        day = str(one.get("시각", "")).split(" ")[0] or "날짜 모름"
+        if day not in days:
+            days[day] = []
+            order.append(day)
+        days[day].append(one)
+
+    out = ""
+    for n, day in enumerate(order):
+        same = days[day]
+        traded = [i for one in same for i in (one.get("처리함") or [])
+                  if i.get("구분") in ("매수", "매도")]
+        bought = len([i for i in traded if i["구분"] == "매수"])
+        sold = len([i for i in traded if i["구분"] == "매도"])
+        # 무슨 일이 있었던 날인지 한 줄로. 닫아 놔도 이것만 보고 넘길 수 있게.
+        if traded:
+            what = " · ".join(x for x in (f"매수 {bought}" if bought else "",
+                                          f"매도 {sold}" if sold else "") if x)
+        else:
+            what = "사고판 것 없음"
+        # 오늘(맨 위)과 실제로 매매가 있었던 날만 펼쳐 둡니다.
+        opened = " open" if (n == 0 or traded) else ""
+        out += (
+            f'<details class="day"{opened}><summary class="dayline">'
+            f'<b>{esc(day)}</b> <span>{len(same)}회차 · {esc(what)}</span></summary>'
+        )
+        # 하루 스물여섯 회차 중 대부분은 아무 일도 없습니다. 그것까지 다 펼치면
+        # 날짜로 묶은 뜻이 없습니다. 무슨 일이 있었던 회차만 보이고 나머지는 셉니다.
+        worth = [one for one in same
+                 if any(i.get("구분") in ("매수", "매도", "예약", "안 함")
+                        for i in (one.get("처리함") or []))]
+        quiet = len(same) - len(worth)
+        out += _rounds(worth)
+        if quiet:
+            out += (f'<p class="none">나머지 {quiet}회차는 살펴보기만 하고 '
+                    f'아무것도 하지 않았습니다.</p>')
+        out += "</details>"
+    return out
+
+
+def _rounds(rounds):
     out = ""
     for one in rounds:
         # 어느 계좌에서 한 일인지 회차마다 붙입니다. 실거래는 눈에 띄게.
@@ -226,6 +281,11 @@ def page(saved, refreshing=True):
 <div class="big">
   <div><small>들고 있는 종목</small><b>{esc(now.get("종목수", "-"))}</b></div>
   <div><small>주문 가능 현금</small><b>{esc(now.get("주문가능현금", "-"))}</b></div>
+</div>
+
+<div class="card">
+  <h2>지금까지 얼마를 벌었나</h2>
+  {limits_table(now.get("성적") or {})}
 </div>
 
 <div class="card">
@@ -416,10 +476,21 @@ def parse_args(argv):
 def main():
     opts = parse_args(sys.argv[1:])
     host = "0.0.0.0" if opts["public"] else "127.0.0.1"
-    port = setup.free_port(host, opts["port"])
+    port = opts["port"]
     # 스레드를 씁니다. 브라우저는 미리 연결만 열어 두고 아무것도 보내지 않는 일이
     # 있는데, 한 줄로 도는 서버는 그 빈 연결을 기다리다 화면 전체가 멈춥니다.
-    server = http.server.ThreadingHTTPServer((host, port), Handler)
+    #
+    # **포트는 밀리지 않습니다.** 예전에는 8778이 잡혀 있으면 아무 포트나 골랐는데,
+    # 그러면 다시 띄울 때마다 주소가 바뀝니다. 주소를 외워 둔 사람에게는 화면이
+    # 사라진 것과 같습니다. 이미 떠 있으면 그 화면을 그대로 쓰면 됩니다.
+    try:
+        server = http.server.ThreadingHTTPServer((host, port), Handler)
+    except OSError:
+        raise SystemExit(
+            f"{port}번 포트를 이미 누가 쓰고 있습니다.\n"
+            f"현황 화면이 이미 떠 있다면 http://127.0.0.1:{port} 를 그대로 여세요.\n"
+            f"다른 포트로 띄우려면 --port 뒤에 숫자를 적어 주세요."
+        ) from None
     server.opened = False
     server.started = time.time()
     server.last_busy = None

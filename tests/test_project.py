@@ -16,6 +16,7 @@ import board
 import broker
 import check
 import setup
+import review
 import strategy
 import telegram
 import trade
@@ -440,14 +441,40 @@ class IntegrationHelpersTests(unittest.TestCase):
 
     def test_board_shows_whether_the_news_was_actually_read(self):
         # 뉴스를 안 보고 지나간 회차가 화면에서 눈에 띄어야 합니다.
-        saved = {"지금": {"보유": []}, "회차": [{"시각": "08-18 01:00", "요약": "그대로 뒀습니다.",
-                 "처리함": [{"종목": "엔비디아(NVDA)", "한 일": "그대로 둠", "뉴스": "관련 제목 없음"},
-                            {"종목": "TSMC(TSM)", "한 일": "그대로 둠", "뉴스": "확인하지 않음"}]}]}
+        # 화면은 무슨 일이 있었던 회차만 펼칩니다. 뉴스 줄도 거기 붙습니다.
+        saved = {"지금": {"보유": []}, "회차": [{"시각": "08-18 01:00", "요약": "한 종목 샀습니다.",
+                 "처리함": [{"종목": "엔비디아(NVDA)", "한 일": "매수 주문 1주", "구분": "매수",
+                            "뉴스": "관련 제목 없음"},
+                            {"종목": "TSMC(TSM)", "한 일": "사지 않음", "구분": "안 함",
+                             "뉴스": "확인하지 않음"}]}]}
         html = board.page(saved)
         self.assertIn('<div class="news">뉴스 · 관련 제목 없음</div>', html)
         # 안 본 것은 빨갛게. class 를 두 번 쓰면 브라우저가 뒤엣것을 버립니다.
         self.assertIn('<div class="news none">뉴스 · 확인하지 않음</div>', html)
         self.assertNotIn('class="news" class=', html)
+
+    def test_board_keeps_the_same_address(self):
+        # 다시 띄울 때마다 주소가 바뀌면, 주소를 외워 둔 사람에게는 화면이 사라진
+        # 것과 같습니다. 빈 포트를 찾아 떠도는 대신 정해진 포트만 씁니다.
+        source = Path(board.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("free_port", source)
+        self.assertIn("8778", source)
+
+    def test_board_groups_rounds_by_day(self):
+        # 15분마다 도니 하루 스물여섯 회차가 쌓입니다. 그대로 펼치면 끝없이 늘어져
+        # 정작 무엇을 사고팔았는지가 안 보입니다. 날짜로 묶고 조용한 회차는 셉니다.
+        quiet = [{"시각": f"08-18 0{n}:00", "요약": "그대로", "처리함": []} for n in range(1, 6)]
+        loud = {"시각": "08-19 01:00", "요약": "샀습니다",
+                "처리함": [{"종목": "엔비디아(NVDA)", "한 일": "매수 주문 1주", "구분": "매수"}]}
+        html = board.page({"지금": {"보유": []}, "회차": [loud] + quiet})
+
+        self.assertIn("<b>08-19</b>", html)
+        self.assertIn("매수 1", html)
+        self.assertIn("<b>08-18</b>", html)
+        self.assertIn("5회차 · 사고판 것 없음", html)
+        # 조용한 다섯 회차는 줄줄이 펼치지 않고 한 줄로 셉니다.
+        self.assertIn("나머지 5회차는", html)
+        self.assertNotIn("08-18 03:00", html)
 
     def test_board_does_not_let_a_stock_name_become_html(self):
         # 종목 이름은 NH가 준 글자입니다. 그대로 넣으면 화면이 깨집니다.
@@ -567,6 +594,8 @@ class IntegrationHelpersTests(unittest.TestCase):
         with (
             mock.patch.object(strategy, "BUY_AMOUNT", 1_000_000),
             mock.patch.object(strategy, "US_BUY_AMOUNT", 600),
+            mock.patch.object(strategy, "US_BUY_AMOUNTS", {}),
+            mock.patch.object(strategy, "DIP_BUY", {}),
             mock.patch.object(strategy, "MAX_HOLDINGS", 5),
         ):
             caps = trade.limits()
@@ -575,6 +604,24 @@ class IntegrationHelpersTests(unittest.TestCase):
         self.assertIn("5,000,000원", caps["최대로 들어갈 수 있는 돈"])
         self.assertIn("$3,000", caps["최대로 들어갈 수 있는 돈"])
         self.assertIn("한 종목에 넣는 돈", board.page({"한도": caps, "지금": {}, "회차": []}))
+
+    def test_a_symbol_with_its_own_budget_shows_up_in_the_limits(self):
+        # 종목마다 금액이 다르면 화면이 "미국 $600"만 보여 줘서는 안 됩니다.
+        # 비싼 자리부터 채운 최대 금액도 그 값으로 나와야 합니다.
+        with (
+            mock.patch.object(strategy, "US_SYMBOLS", ["NVDA", "SOXL"]),
+            mock.patch.object(strategy, "US_BUY_AMOUNT", 600),
+            mock.patch.object(strategy, "US_BUY_AMOUNTS", {"SOXL": 10_000}),
+            mock.patch.object(strategy, "STOP_LOSS_PCTS", {"SOXL": -20.0}),
+            mock.patch.object(strategy, "DIP_BUY", {}),
+            mock.patch.object(strategy, "MAX_HOLDINGS", 2),
+        ):
+            caps = trade.limits()
+            self.assertEqual(trade.us_budget("SOXL"), 10_000)
+            self.assertEqual(trade.us_budget("NVDA"), 600)
+        self.assertIn("SOXL $10,000", caps["한 종목에 넣는 돈"])
+        self.assertIn("$10,600", caps["최대로 들어갈 수 있는 돈"])
+        self.assertIn("SOXL -20.0%", caps["손절 · 익절"])
 
     def test_one_share_costing_more_than_the_budget_is_not_bought(self):
         # MU 한 주가 $1,029 인데 예산이 $600 이면 0주입니다. 예산을 넘겨 사지 않습니다.
@@ -591,6 +638,307 @@ class IntegrationHelpersTests(unittest.TestCase):
         ):
             note = trade.buy("500", m, {}, "사고 싶다")
         self.assertIn("0주", note)
+
+    def test_take_profit_is_placed_ahead_of_time_and_only_once(self):
+        # 회차 사이에 목표를 찍고 되돌아오면 늦습니다. 미리 걸어 둬야 합니다.
+        # 그리고 이미 걸려 있으면 또 걸면 안 됩니다. 두 번 팔리게 됩니다.
+        held = {"NVDA": {"name": "NVDA", "qty": 5, "avg": 20.0, "pnl_pct": 0.0}}
+        sent = []
+        with (
+            mock.patch.object(strategy, "US_SYMBOLS", ["NVDA"]),
+            mock.patch.object(strategy, "TAKE_PROFIT_PCT", 3.0),
+            mock.patch.object(broker, "us_session", return_value="regular"),
+            mock.patch.object(broker, "us_sellable", return_value=5),
+            mock.patch.object(broker, "us_order", side_effect=lambda *a, **k: sent.append(a) or "9"),
+            mock.patch.object(broker, "us_open_sells", return_value={}),
+        ):
+            done = trade.rest_take_profit("500", held)
+        # 평균 $20.00 의 +3% 는 $20.60 입니다.
+        self.assertEqual(sent[0][1:], ("sell", "NVDA", 5, 20.6, "00"))
+        self.assertIn("$20.60", done[0]["한 일"])
+
+        # 이미 걸려 있으면 그 수량이 묶여 팔 수 있는 수량이 모자랍니다. 그때는 안 겁니다.
+        # 주문 조회로 판정하면 지난 날짜의 죽은 기록에 속습니다. 수량으로 봅니다.
+        with (
+            mock.patch.object(strategy, "US_SYMBOLS", ["NVDA"]),
+            mock.patch.object(broker, "us_session", return_value="regular"),
+            mock.patch.object(broker, "us_sellable", return_value=0),
+            mock.patch.object(broker, "us_order", side_effect=AssertionError("또 걸면 안 됨")),
+        ):
+            done = trade.rest_take_profit("500", held)
+        self.assertIn("이미 걸려 있거나", done[0]["한 일"])
+
+    def test_the_dip_slot_buys_the_fall_not_the_breakout(self):
+        # 딥매수 자리는 정반대 규칙입니다. 돌파 조건에 걸리면 영영 못 삽니다.
+        # 그리고 판단 기준은 이 종목이 아니라 지수여야 합니다. 3배 상품은 자기
+        # 200일선이 지수와 어긋나서, 실제로 사야 할 날을 놓친 적이 있습니다.
+        falling = [100.0 - i * 0.3 for i in range(60)]  # 돌파 조건은 전부 실패하는 줄
+        rising_index = [200.0 + i for i in range(260)]  # 지수는 200일선 위
+
+        def tqqq(index, **over):
+            m = {
+                "code": "TQQQ", "name": "TQQQ", "market": "us", "currency": "USD",
+                "price": falling[-1], "closes": falling, "index_closes": index,
+                "held": False, "qty": 0, "avg": 0, "pnl_pct": 0.0, "cash": 10_000_000,
+                "turnover": 9e8, "high_52w": 200.0,
+                "ai": {"decision": "buy", "reason": "눌린 자리"},
+            }
+            m.update(over)
+            return m
+
+        # 지수가 고점 근처면 아직 안 삽니다.
+        self.assertIn("덜 빠졌습니다", strategy.decide(tqqq(rising_index))[1])
+
+        # 지수가 -10% 넘게 빠졌고 200일선 위면 삽니다. 이 종목의 이동평균·MACD·RSI는
+        # 전부 아래를 보고 있어도 상관없습니다. 그것이 딥매수입니다.
+        dipped = rising_index + [rising_index[-1] * 0.88]
+        self.assertEqual(strategy.decide(tqqq(dipped))[0], "buy")
+
+        # 200일선 아래면 눌린 자리가 아니라 무너지는 자리입니다. 사지 않습니다.
+        crashed = rising_index + [rising_index[-1] * 0.5]
+        self.assertIn("200일 평균 아래", strategy.decide(tqqq(crashed))[1])
+
+    def test_the_band_dip_buys_below_the_lower_band_and_sells_at_the_middle(self):
+        # 볼린저 자리는 하단 아래에서만 사고, 중간값(20일 평균)을 되찾으면 팝니다.
+        # +3%에 팔면 이기는 폭이 지는 폭보다 작아져 승률이 높아도 합치면 잃습니다.
+        wobbly = [100.0 + (3.0 if i % 2 else -3.0) for i in range(40)]  # 20일 평균 100
+
+        def soxl(price, held=False, closes=None):
+            return {
+                "code": "SOXL", "name": "SOXL", "market": "us", "currency": "USD",
+                "price": price, "closes": closes or wobbly, "index_closes": [],
+                "held": held, "qty": 5 if held else 0, "avg": 94.0 if held else 0,
+                "pnl_pct": (price / 94.0 - 1) * 100 if held else 0.0,
+                "cash": 10_000_000, "turnover": 9e8, "high_52w": 200.0,
+                "ai": {"decision": "buy", "reason": "눌린 자리"},
+            }
+
+        # 표준편차 3.0, 1.5σ 하단은 95.5. 그 위에서는 안 삽니다.
+        self.assertIn("볼린저 하단", strategy.decide(soxl(97.0))[1])
+        self.assertEqual(strategy.decide(soxl(94.0))[0], "buy")
+
+        # 들고 있을 때: +3%를 넘어도 20일 평균 아래면 안 팝니다.
+        self.assertEqual(strategy.decide(soxl(98.0, held=True))[0], "hold")
+        action, why = strategy.decide(soxl(100.5, held=True))
+        self.assertEqual(action, "sell")
+        self.assertIn("20일 평균", why)
+
+    def test_the_score_counts_what_was_sold_not_only_what_is_held(self):
+        # 들고 있는 것의 손익만 보면 판 것이 안 보입니다. 얼마를 벌었는지는
+        # 판 것과 들고 있는 것을 합쳐야 나옵니다. 수수료도 빼고 셉니다.
+        ledger = [
+            {"종목": "AAA", "구분": "매수", "수량": 10, "단가": 100.0},
+            {"종목": "AAA", "구분": "매도", "수량": 10, "단가": 110.0},   # +100 에서 수수료
+            {"종목": "BBB", "구분": "매수", "수량": 5, "단가": 200.0},
+            {"종목": "BBB", "구분": "매도", "수량": 5, "단가": 180.0},    # -100 에서 수수료
+            {"종목": "CCC", "구분": "매수", "수량": 4, "단가": 50.0},     # 아직 들고 있음
+        ]
+        held = {"CCC": {"qty": 4, "avg": 50.0, "price": 60.0, "krw": 348_000}}
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "trades.json"
+            path.write_text(json.dumps(ledger, ensure_ascii=False), encoding="utf-8")
+            with mock.patch.object(trade, "LEDGER", path):
+                got = trade.performance(held)
+
+        self.assertIn("2번 · 1승 1패", got["판 것"])
+        self.assertEqual(got["이긴 비율"], "50%")
+        # 판 것 -1.81달러(수수료 때문에 딱 0이 아닙니다) + 들고 있는 것 +40달러
+        self.assertIn("$+40.00", got["들고 있는 것"])
+        self.assertIn("원)", got["합계"])  # 원화도 같이 적습니다
+
+    def test_the_limits_include_the_dip_seats(self):
+        # 딥매수 자리는 최대 종목 수에 안 세므로 한도에 **따로 더해야** 합니다.
+        # 화면이 실제보다 적은 금액을 말하면, 파일을 못 여는 사람은 영영 모릅니다.
+        with (
+            mock.patch.object(strategy, "US_SYMBOLS", ["NVDA", "MSFT", "META", "SOXL", "TQQQ"]),
+            mock.patch.object(strategy, "US_BUY_AMOUNT", 2000),
+            mock.patch.object(strategy, "US_BUY_AMOUNTS", {"SOXL": 10_000}),
+            mock.patch.object(strategy, "DIP_BUY", {"SOXL": {}, "TQQQ": {}}),
+            mock.patch.object(strategy, "MAX_HOLDINGS", 3),
+        ):
+            caps = trade.limits()
+        # 돌파 3자리 $6,000 + SOXL $10,000 + TQQQ $2,000 = $18,000
+        self.assertIn("$18,000", caps["최대로 들어갈 수 있는 돈"])
+        self.assertIn("딥매수", caps["최대 종목 수"])
+
+    def test_the_dip_slot_has_its_own_seat(self):
+        # 딥 신호는 1년에 며칠뿐입니다. 그날 다른 종목이 자리를 붙들고 있으면
+        # 그 해의 기회가 통째로 사라집니다. 실제 데이터에서 그렇게 지나갔습니다.
+        full = {"NVDA": {}, "MSFT": {}, "META": {}}  # 최대 종목 수를 이미 채운 상태
+        m = {
+            "code": "TQQQ", "name": "TQQQ", "market": "us", "currency": "USD",
+            "price": 50.0, "held": False, "qty": 0,
+        }
+        with (
+            mock.patch.object(strategy, "MAX_HOLDINGS", 3),
+            mock.patch.object(strategy, "DIP_BUY", {"TQQQ": {"entry_dip": -10.0, "index_sma_days": 200}}),
+            mock.patch.object(broker, "MOCK", True),
+            mock.patch.object(broker, "us_session", return_value="regular"),
+            mock.patch.object(broker, "us_buyable", return_value=40),
+            mock.patch.object(broker, "us_order", return_value="11"),
+        ):
+            self.assertIn("주문번호", trade.buy("500", m, dict(full), "눌린 자리"))
+            # 딥 자리가 아닌 종목은 그대로 막힙니다.
+            other = dict(m, code="AVGO", name="브로드컴")
+            self.assertIn("최대", trade.buy("500", other, dict(full), "돌파"))
+
+    def test_the_dip_slot_takes_profit_at_the_old_high_not_at_a_percent(self):
+        # +3%에 팔아 버리면 전고점 회복까지 기다리는 전략이 성립하지 않습니다.
+        def held(price):
+            return {
+                "code": "TQQQ", "name": "TQQQ", "market": "us", "currency": "USD",
+                "price": price, "closes": [100.0] * 60, "index_closes": [],
+                "held": True, "qty": 10, "avg": 60.0,
+                "pnl_pct": (price / 60.0 - 1) * 100, "cash": 0,
+                "turnover": 9e8, "high_52w": 88.0, "ai": None,
+            }
+
+        # +3%를 넘어도 안 팝니다.
+        self.assertEqual(strategy.decide(held(70.0))[0], "hold")
+        # 52주 고점을 회복하면 그때 팝니다.
+        action, why = strategy.decide(held(88.5))
+        self.assertEqual(action, "sell")
+        self.assertIn("52주 고점", why)
+        # 손절선은 그대로 삽니다.
+        self.assertEqual(strategy.decide(held(41.0))[0], "sell")
+
+    def test_no_percent_take_profit_order_is_rested_for_the_dip_slot(self):
+        # 걸어 두는 익절 주문도 마찬가지입니다. TQQQ에 +3% 매도를 걸면 안 됩니다.
+        held = {"TQQQ": {"name": "TQQQ", "qty": 10, "avg": 60.0, "pnl_pct": 0.0}}
+        with (
+            mock.patch.object(strategy, "US_SYMBOLS", ["TQQQ"]),
+            mock.patch.object(strategy, "TAKE_PROFIT_PCT", 3.0),
+            mock.patch.object(strategy, "TAKE_PROFIT_PCTS", {"TQQQ": None}),
+            mock.patch.object(broker, "us_session", return_value="regular"),
+            mock.patch.object(broker, "us_sellable", return_value=10),
+            mock.patch.object(broker, "us_order", side_effect=AssertionError("걸면 안 됨")),
+        ):
+            self.assertEqual(trade.rest_take_profit("500", held), [])
+
+    def test_the_backtest_assumes_the_stop_hit_first_when_both_did(self):
+        # 일봉에는 고가·저가만 있고 순서가 없습니다. 같은 날 익절선과 손절선에 다
+        # 닿았으면 좋은 쪽을 고르면 안 됩니다. 성적이 실제보다 좋아 보입니다.
+        def bar(day, low, high, close):
+            return {"date": day, "open": close, "high": high, "low": low, "close": close}
+
+        # 오르기만 하다가 산 다음 날 위아래로 크게 흔들린 종목.
+        rows = [bar(f"2026010{i}" if i < 10 else f"202601{i}", 100 + i, 100 + i, 100 + i)
+                for i in range(1, 41)]
+        rows[-1] = bar("20260140", 100.0, 200.0, 150.0)  # 익절선·손절선 둘 다 닿는 날
+
+        with mock.patch.object(review, "rules_say_buy", side_effect=lambda c, p, *a: len(c) == 39):
+            trades, _ = review.simulate(
+                {"X": rows}, take_pct=3.0, stop_pcts={}, base_stop=-10.0,
+                budgets={}, base_budget=10_000, most=1,
+            )
+        self.assertEqual([t["이유"] for t in trades], ["손절"])
+
+    def test_the_backtest_counts_wins_and_losses_honestly(self):
+        trades = [
+            {"손익": 10.0, "수익률": 3.0, "산 날": "20260101", "판 날": "20260105"},
+            {"손익": -50.0, "수익률": -20.0, "산 날": "20260106", "판 날": "20260108"},
+            {"손익": -5.0, "수익률": -10.0, "산 날": "20260109", "판 날": "20260110"},
+        ]
+        got = review.score(trades)
+        # 이겨도 합치면 잃을 수 있습니다. 승률만 보면 안 된다는 것이 이 표의 요점입니다.
+        self.assertEqual(got["승률"], "33.3%")
+        self.assertEqual(got["총손익"], "$-45.00")
+        self.assertEqual(got["연속으로 진 최대 횟수"], 2)
+        self.assertEqual(got["가장 나빴던 거래"], "-20.00%")
+
+    def test_the_buy_conditions_are_enforced_not_merely_requested(self):
+        # 「사라」 세 줄이 INSTRUCTIONS 에만 있으면 클로드 코드가 대충 봐도 그냥 사집니다.
+        # 규칙이 막아야 합니다. 클로드 코드가 buy 라고 해도요.
+        rising = [100.0 + i for i in range(60)]  # 5일 > 20일, MACD 양수, RSI 100
+
+        def stock(**over):
+            m = {
+                "code": "TEST", "name": "테스트", "market": "us", "currency": "USD",
+                "price": rising[-1], "closes": rising, "held": False, "qty": 0, "avg": 0,
+                "pnl_pct": 0.0, "cash": 10_000_000, "turnover": 9e8, "high_52w": 1e9,
+                "ai": {"decision": "buy", "reason": "사고 싶다"},
+            }
+            m.update(over)
+            return m
+
+        # 계속 오르기만 한 줄은 RSI가 100입니다. 달아오른 데 들어가지 않습니다.
+        self.assertEqual(strategy.decide(stock())[0], "hold")
+
+        # 현재가가 평균 아래면 아직 돌파가 아닙니다.
+        wobbly = rising[:-1] + [rising[-1] - 30]
+        self.assertIn("평균을 넘지 못했습니다", strategy.decide(stock(closes=wobbly, price=wobbly[-1]))[1])
+
+        # 흐름이 아래로 꺾이면 MACD가 신호선 아래로 갑니다.
+        falling = [160.0 - i for i in range(60)]
+        self.assertEqual(strategy.decide(stock(closes=falling, price=falling[-1]))[0], "hold")
+
+        # 시세가 모자라면 확인할 수가 없습니다. 모르는 채로 사지 않습니다.
+        self.assertIn("쌓이지 않아", strategy.decide(stock(closes=rising[:10], price=109.0))[1])
+
+        # 세 줄을 다 채우면 그때는 클로드 코드의 판단대로 삽니다.
+        # 오르내리며 오르는 줄이라야 RSI가 100이 안 됩니다. 실제 주가가 그렇습니다.
+        calm = [100.0 + i * 0.5 + (1.2 if i % 2 else -1.2) for i in range(60)]
+        self.assertEqual(strategy.decide(stock(closes=calm, price=calm[-1]))[0], "buy")
+
+    def test_stop_loss_is_reserved_ahead_and_cleaned_up_when_sold(self):
+        # 손절은 지정가로 미리 못 겁니다. STOP 예약으로 걸고, 안 들고 있으면 치웁니다.
+        held = {"SOXL": {"name": "SOXL", "qty": 5, "avg": 20.0, "pnl_pct": 0.0}}
+        sent = []
+        with (
+            mock.patch.object(strategy, "US_SYMBOLS", ["SOXL"]),
+            mock.patch.object(strategy, "STOP_LOSS_PCT", -10.0),
+            mock.patch.object(strategy, "STOP_LOSS_PCTS", {"SOXL": -20.0}),
+            mock.patch.object(broker, "MOCK", False),  # 모의투자는 STOP 예약을 안 받습니다
+            mock.patch.object(trade, "approved", return_value=""),
+            mock.patch.object(broker, "us_session", return_value="regular"),
+            mock.patch.object(broker, "us_reserved_stops", return_value={}),
+            mock.patch.object(broker, "us_reserve_stop", side_effect=lambda *a: sent.append(a) or "7"),
+        ):
+            done = trade.rest_stop_loss("500", held)
+
+        # 모의투자 서버는 STOP 예약을 받지 않습니다. 헛되이 부르지 않습니다.
+        with (
+            mock.patch.object(broker, "MOCK", True),
+            mock.patch.object(broker, "us_session", return_value="regular"),
+            mock.patch.object(broker, "us_reserve_stop", side_effect=AssertionError("부르면 안 됨")),
+        ):
+            self.assertEqual(trade.rest_stop_loss("500", held), [])
+        # SOXL은 -10%가 아니라 제 손절선 -20%를 씁니다. $20.00 의 -20% 는 $16.00.
+        self.assertEqual(sent, [("500", "SOXL", 5, 16.0)])
+        self.assertIn("$16.00", done[0]["한 일"])
+
+        # 팔고 나서 남은 예약은 다음 회차가 치웁니다. 없는 주식을 팔면 안 됩니다.
+        cancelled = []
+        with (
+            mock.patch.object(strategy, "US_SYMBOLS", ["SOXL"]),
+            mock.patch.object(broker, "MOCK", False),
+            mock.patch.object(broker, "us_session", return_value="regular"),
+            mock.patch.object(broker, "us_reserved_stops",
+                              return_value={"SOXL": [{"day": "20260908", "no": "7", "qty": 5, "stop": 16.0}]}),
+            mock.patch.object(broker, "us_reserved_cancel", side_effect=lambda *a: cancelled.append(a)),
+            mock.patch.object(broker, "us_reserve_stop", side_effect=AssertionError("걸면 안 됨")),
+        ):
+            trade.rest_stop_loss("500", {})
+        self.assertEqual(cancelled, [("500", "SOXL", "20260908", "7")])
+
+    def test_stop_loss_cancels_the_resting_take_profit_first(self):
+        # 걸어 둔 익절이 수량을 묶고 있으면 손절이 0주로 조용히 실패합니다.
+        m = {
+            "code": "SOXL", "name": "SOXL", "market": "us", "currency": "USD",
+            "price": 16.0, "qty": 5, "avg": 20.0, "pnl_pct": -20.0, "held": True,
+        }
+        cancelled = []
+        with (
+            mock.patch.object(broker, "MOCK", True),
+            mock.patch.object(broker, "us_session", return_value="regular"),
+            mock.patch.object(broker, "us_open_sells", return_value={"SOXL": [{"orr_no": "9", "qty": 5, "price": 20.6}]}),
+            mock.patch.object(broker, "us_cancel", side_effect=lambda *a: cancelled.append(a)),
+            mock.patch.object(broker, "us_sellable", return_value=5),
+            mock.patch.object(broker, "us_order", return_value="10"),
+        ):
+            note = trade.sell("500", m, "손절")
+        self.assertEqual(cancelled, [("500", "SOXL", "9")])
+        self.assertIn("주문번호", note)
 
     def test_switching_to_the_real_account_does_not_ask_for_the_keys_again(self):
         # 모의 ↔ 실제만 바꾸려는 사람이 키를 다시 찾아와야 한다면, 개발을 모르는
